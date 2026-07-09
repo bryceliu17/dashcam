@@ -1,0 +1,16 @@
+@baseUrl = http://localhost:5000
+
+GET {{baseUrl}}/api/health
+Accept: application/json
+
+###
+GET {{baseUrl}}/api/videos?page=1&pageSize=50
+Accept: application/json
+
+###
+GET {{baseUrl}}/api/storage/status
+Accept: application/json
+
+###
+POST {{baseUrl}}/api/videos/cleanup
+Accept: application/json

@@ -1,0 +1,670 @@
+package com.example.dashcam
+
+import android.Manifest
+import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.view.Gravity
+import android.view.View
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.MediaController
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import android.widget.VideoView
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.example.dashcam.data.DashcamDatabase
+import com.example.dashcam.data.VideoEntity
+import com.example.dashcam.network.ServerClient
+import com.example.dashcam.recording.RecordingService
+import com.example.dashcam.recording.StoragePolicy
+import com.example.dashcam.upload.UploadWorker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.DateFormat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.Executors
+
+class MainActivity : ComponentActivity() {
+    private lateinit var recordingStatus: TextView
+    private lateinit var chargingStatus: TextView
+    private lateinit var serverStatus: TextView
+    private lateinit var storageStatus: TextView
+    private lateinit var serverUrl: EditText
+    private lateinit var previewView: PreviewView
+    private lateinit var videoList: ListView
+    private lateinit var adapter: ArrayAdapter<String>
+    private var videos: List<VideoEntity> = emptyList()
+    private var showingVideoManager = false
+    private var showingVideoList = false
+    private var returnToVideoListAfterManager = false
+    private val cameraExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var recording: Recording? = null
+    private var continueRecording = false
+    private var segmentStart = 0L
+    private var segmentFile: File? = null
+    private var segmentDurationSeconds = 0
+    private var manualStartTime: Long? = null
+    private var completedSegmentsSinceManualStart = 0
+    private var overwrittenVideosSinceManualStart = 0
+    private val timerRunnable = object : Runnable {
+        override fun run() {
+            updateRecordingStatus()
+            if (recording != null || continueRecording) mainHandler.postDelayed(this, 1000)
+        }
+    }
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[Manifest.permission.CAMERA] == true) startDashcam()
+        else toast("Camera permission is required")
+    }
+
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            renderRecording(intent?.getBooleanExtra(RecordingService.EXTRA_ACTIVE, false) == true)
+            intent?.getStringExtra(RecordingService.EXTRA_MESSAGE)?.let(::toast)
+        }
+    }
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) { renderCharging(intent) }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        buildUi()
+        val prefs = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
+        serverUrl.setText(prefs.getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL))
+        setRecordingPreference(false)
+        renderRecording(false)
+        observeVideos()
+        checkServer()
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (showingVideoManager) {
+                    showingVideoManager = false
+                    if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
+                } else if (showingVideoList) {
+                    showingVideoList = false
+                    buildUi()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (::previewView.isInitialized) RecordingService.previewSurfaceProvider = previewView.surfaceProvider
+        ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+    }
+
+    override fun onStop() {
+        try { unregisterReceiver(stateReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(batteryReceiver) } catch (_: IllegalArgumentException) { }
+        RecordingService.previewSurfaceProvider = null
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (recording != null || continueRecording) stopDashcam("Activity closed")
+        cameraExecutor.shutdown()
+        super.onDestroy()
+    }
+
+    private fun buildUi() {
+        showingVideoList = false
+        returnToVideoListAfterManager = false
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(Color.rgb(244, 244, 240))
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(18), dp(20), dp(18))
+            setBackgroundColor(Color.rgb(244, 244, 240))
+        }
+        root.addView(TextView(this).apply {
+            text = "LOCAL DASHCAM"; textSize = 11f; letterSpacing = .18f; setTextColor(Color.rgb(77, 124, 15))
+        })
+        root.addView(TextView(this).apply {
+            text = "行车记录仪"; textSize = 30f; setTextColor(Color.rgb(17, 24, 39)); setPadding(0, dp(3), 0, dp(18))
+        })
+
+        recordingStatus = statusRow("录制状态")
+        chargingStatus = statusRow("供电状态")
+        serverStatus = statusRow("家庭服务器")
+        storageStatus = statusRow("本地视频")
+        listOf(recordingStatus, chargingStatus, serverStatus, storageStatus).forEach(root::addView)
+
+        previewView = PreviewView(this).apply {
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            setBackgroundColor(Color.BLACK)
+        }
+        root.addView(previewView, LinearLayout.LayoutParams(-1, dp(220)).apply { topMargin = dp(14) })
+        RecordingService.previewSurfaceProvider = previewView.surfaceProvider
+
+        serverUrl = EditText(this).apply {
+            hint = "http://192.168.1.50:5000"; textSize = 14f
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true); setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        root.addView(serverUrl, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(18) })
+
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        controls.addView(actionButton("Start Dashcam") { requestStart() }, weighted())
+        controls.addView(actionButton("Stop") {
+            stopDashcam("Stopped by user")
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(12) })
+        val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        secondaryControls.addView(actionButton("Upload Now") {
+            saveServerUrl(); UploadWorker.enqueueNow(this); checkServer(showResult = true)
+        }, weighted())
+        secondaryControls.addView(actionButton("Local Videos") {
+            showLocalVideos()
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(secondaryControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        scroll.addView(root)
+        setContentView(scroll)
+        updateRecordingStatus()
+    }
+
+    private fun showLocalVideos() {
+        showingVideoList = true
+        showingVideoManager = false
+        returnToVideoListAfterManager = false
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setBackgroundColor(Color.rgb(244, 244, 240))
+        }
+
+        root.addView(TextView(this).apply {
+            text = "本地视频"
+            textSize = 24f
+            setTextColor(Color.rgb(17, 24, 39))
+            setPadding(0, 0, 0, dp(8))
+        })
+        root.addView(TextView(this).apply {
+            text = "${videos.size} 个 · ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
+            textSize = 14f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(0, 0, 0, dp(10))
+        })
+
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
+        videoList = ListView(this).apply {
+            adapter = this@MainActivity.adapter
+            dividerHeight = 1
+            setOnItemClickListener { _, _, position, _ ->
+                returnToVideoListAfterManager = true
+                showVideoManager(videos[position])
+            }
+            setOnItemLongClickListener { _, _, position, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    DashcamDatabase.get(this@MainActivity).videoDao().toggleLock(videos[position].id)
+                }
+                true
+            }
+        }
+        adapter.addAll(videos.map(::formatVideo))
+        root.addView(videoList, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(actionButton("Back") {
+            showingVideoList = false
+            buildUi()
+        }, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(10) })
+        setContentView(root)
+    }
+
+    private fun showVideoManager(video: VideoEntity) {
+        val file = File(video.localPath)
+        if (!file.exists()) {
+            toast("Video file is missing")
+            return
+        }
+
+        showingVideoManager = true
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setBackgroundColor(Color.rgb(244, 244, 240))
+        }
+
+        root.addView(TextView(this).apply {
+            text = video.filename
+            textSize = 18f
+            setTextColor(Color.rgb(17, 24, 39))
+            setPadding(0, 0, 0, dp(10))
+        })
+
+        val player = VideoView(this).apply {
+            setVideoPath(file.absolutePath)
+            setMediaController(MediaController(this@MainActivity).also { it.setAnchorView(this) })
+            setOnPreparedListener { it.isLooping = false; start() }
+            setOnErrorListener { _, _, _ ->
+                toast("Unable to play this video")
+                true
+            }
+        }
+        root.addView(player, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        root.addView(TextView(this).apply {
+            val lock = if (video.locked) "LOCKED" else "NORMAL"
+            text = "${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock\n${file.absolutePath}"
+            textSize = 12f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(0, dp(10), 0, dp(10))
+        })
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        controls.addView(actionButton("Back") {
+            player.stopPlayback()
+            showingVideoManager = false
+            if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
+        }, weighted())
+        controls.addView(actionButton(if (video.locked) "Unlock" else "Lock") {
+            lifecycleScope.launch(Dispatchers.IO) {
+                DashcamDatabase.get(this@MainActivity).videoDao().toggleLock(video.id)
+                withContext(Dispatchers.Main) {
+                    player.stopPlayback()
+                    showingVideoManager = false
+                    if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
+                }
+            }
+        }, weighted().apply { marginStart = dp(8) })
+        controls.addView(actionButton("Delete") {
+            confirmDelete(video, player)
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)))
+        setContentView(root)
+    }
+
+    private fun confirmDelete(video: VideoEntity, player: VideoView) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete video?")
+            .setMessage(video.filename)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val file = File(video.localPath)
+                    val deleted = !file.exists() || file.delete()
+                    if (deleted) DashcamDatabase.get(this@MainActivity).videoDao().delete(video)
+                    withContext(Dispatchers.Main) {
+                        if (!deleted) {
+                            toast("Unable to delete video file")
+                        } else {
+                            player.stopPlayback()
+                            showingVideoManager = false
+                            if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
+                        }
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun statusRow(label: String) = TextView(this).apply {
+        text = "$label  —"; textSize = 14f; setTextColor(Color.rgb(55, 65, 81));
+        setPadding(dp(12), dp(12), dp(12), dp(12)); setBackgroundColor(Color.WHITE)
+    }
+
+    private fun actionButton(label: String, action: (View) -> Unit) = Button(this).apply {
+        text = label; isAllCaps = false; setOnClickListener(action)
+    }
+
+    private fun weighted() = LinearLayout.LayoutParams(0, -1, 1f)
+
+    private fun requestStart() {
+        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
+        if (permissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) startDashcam()
+        else permissionLauncher.launch(permissions.toTypedArray())
+    }
+
+    private fun startDashcam() {
+        // Monitoring-camera mode: start and stop are manual, so recording is no
+        // longer blocked when the device is not charging.
+        // if (!isCharging()) { toast("Connect power before starting the dashcam"); return }
+        if (recording != null || continueRecording) return
+        manualStartTime = System.currentTimeMillis()
+        completedSegmentsSinceManualStart = 0
+        overwrittenVideosSinceManualStart = 0
+        continueRecording = true
+        setRecordingPreference(true)
+        renderRecording(true)
+        mainHandler.removeCallbacks(timerRunnable)
+        mainHandler.post(timerRunnable)
+        startCameraAndSegment()
+    }
+
+    private fun startCameraAndSegment() {
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                cameraProvider = future.get()
+                startSegment()
+            } catch (error: Exception) {
+                failRecording("Camera unavailable: ${error.message}")
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun startSegment() {
+        if (!continueRecording || recording != null) return
+        val directory = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "dashcam").apply { mkdirs() }
+        lifecycleScope.launch {
+            val storage = withContext(Dispatchers.IO) { StoragePolicy.prepareForRecordingWithResult(this@MainActivity, directory) }
+            overwrittenVideosSinceManualStart += storage.deletedCount
+            updateRecordingStatus()
+            if (!storage.canRecord) {
+                failRecording("Storage full, recording stopped.")
+                return@launch
+            }
+
+            try {
+                val capture = bindCameraForRecording()
+                segmentStart = System.currentTimeMillis()
+                segmentDurationSeconds = 0
+                updateRecordingStatus()
+                val filename = SimpleDateFormat("'dashcam_'yyyyMMdd_HHmmss'.mp4'", Locale.US).format(Date(segmentStart))
+                segmentFile = File(directory, filename)
+                val options = FileOutputOptions.Builder(segmentFile!!).build()
+                recording = capture.output.prepareRecording(this@MainActivity, options)
+                    .start(cameraExecutor) { event -> handleVideoEvent(event) }
+            } catch (error: Exception) {
+                failRecording("Unable to start recording: ${error.message}")
+            }
+        }
+    }
+
+    private fun bindCameraForRecording(): VideoCapture<Recorder> {
+        val provider = cameraProvider ?: throw IllegalStateException("Camera provider not ready")
+        val cameras = listOf(
+            "back" to CameraSelector.DEFAULT_BACK_CAMERA,
+            "front" to CameraSelector.DEFAULT_FRONT_CAMERA
+        )
+        val qualities = listOf(
+            "1080p" to Quality.FHD,
+            "720p" to Quality.HD,
+            "480p" to Quality.SD
+        )
+        var lastError: Exception? = null
+
+        for ((cameraName, selector) in cameras) {
+            if (!provider.hasCamera(selector)) continue
+            for ((qualityName, quality) in qualities) {
+                try {
+                    val recorder = Recorder.Builder().setQualitySelector(
+                        QualitySelector.fromOrderedList(
+                            listOf(quality),
+                            FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
+                        )
+                    ).build()
+                    val capture = VideoCapture.withOutput(recorder)
+                    val preview = Preview.Builder().build().also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+
+                    provider.unbindAll()
+                    provider.bindToLifecycle(this, selector, preview, capture)
+                    toast("Camera ready: $cameraName $qualityName")
+                    return capture
+                } catch (error: Exception) {
+                    lastError = error
+                }
+            }
+        }
+
+        throw IllegalStateException("No supported camera recording combination: ${lastError?.message.orEmpty()}")
+    }
+
+    private fun handleVideoEvent(event: VideoRecordEvent) {
+        when (event) {
+            is VideoRecordEvent.Start -> {
+                updateSegmentDuration(event)
+                runOnUiThread {
+                    renderRecording(true)
+                    toast("Recording segment started")
+                }
+                scheduleSegmentRotation()
+            }
+            is VideoRecordEvent.Status -> {
+                updateSegmentDuration(event)
+                runOnUiThread { updateRecordingStatus() }
+            }
+            is VideoRecordEvent.Finalize -> {
+                updateSegmentDuration(event)
+                val finishedFile = segmentFile
+                val startedAt = segmentStart
+                recording = null
+                segmentFile = null
+
+                if (finishedFile != null && finishedFile.length() > 0) {
+                    val endedAt = System.currentTimeMillis()
+                    val durationSeconds = segmentDurationSeconds.takeIf { it > 0 }
+                        ?: ((endedAt - startedAt) / 1000).toInt().coerceAtLeast(1)
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        DashcamDatabase.get(this@MainActivity).videoDao().insert(
+                            VideoEntity(
+                                filename = finishedFile.name,
+                                localPath = finishedFile.absolutePath,
+                                startTime = startedAt,
+                                endTime = endedAt,
+                                durationSeconds = durationSeconds,
+                                fileSizeBytes = finishedFile.length()
+                            )
+                        )
+                        UploadWorker.enqueueNow(this@MainActivity)
+                        withContext(Dispatchers.Main) {
+                            if (continueRecording) completedSegmentsSinceManualStart += 1
+                            updateRecordingStatus()
+                            toast("Saved ${finishedFile.name}")
+                            afterSegmentFinalized()
+                        }
+                    }
+                } else {
+                    finishedFile?.delete()
+                    val message = if (!continueRecording) {
+                        "Stopped"
+                    } else if (event.hasError()) {
+                        "Recording failed: ${event.error} ${event.cause?.message.orEmpty()}".trim()
+                    } else {
+                        "Recording did not produce a playable video"
+                    }
+                    runOnUiThread {
+                        toast(message)
+                        afterSegmentFinalized()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun updateSegmentDuration(event: VideoRecordEvent) {
+        segmentDurationSeconds = (event.recordingStats.recordedDurationNanos / 1_000_000_000L)
+            .toInt()
+            .coerceAtLeast(segmentDurationSeconds)
+    }
+
+    private fun scheduleSegmentRotation() {
+        mainHandler.postDelayed({
+            if (continueRecording) recording?.stop()
+        }, SEGMENT_DURATION_MS)
+    }
+
+    private fun afterSegmentFinalized() {
+        if (continueRecording) {
+            startSegment()
+        } else {
+            cameraProvider?.unbindAll()
+            setRecordingPreference(false)
+            renderRecording(false)
+            mainHandler.removeCallbacks(timerRunnable)
+        }
+    }
+
+    private fun stopDashcam(reason: String) {
+        continueRecording = false
+        mainHandler.removeCallbacksAndMessages(null)
+        val current = recording
+        if (current != null) {
+            toast("Stopping and saving current segment")
+            current.stop()
+        } else {
+            cameraProvider?.unbindAll()
+            setRecordingPreference(false)
+            renderRecording(false)
+            mainHandler.removeCallbacks(timerRunnable)
+            toast(reason)
+        }
+    }
+
+    private fun failRecording(message: String) {
+        continueRecording = false
+        mainHandler.removeCallbacks(timerRunnable)
+        recording?.stop()
+        cameraProvider?.unbindAll()
+        setRecordingPreference(false)
+        renderRecording(false)
+        toast(message)
+    }
+
+    private fun observeVideos() {
+        lifecycleScope.launch {
+            DashcamDatabase.get(this@MainActivity).videoDao().observeAll().collectLatest { items ->
+                videos = items
+                if (::adapter.isInitialized && showingVideoList) {
+                    adapter.clear()
+                    adapter.addAll(items.map(::formatVideo))
+                }
+                if (::storageStatus.isInitialized) {
+                    storageStatus.text = "本地视频  ${items.size} 个 · ${formatBytes(items.sumOf { it.fileSizeBytes })}"
+                }
+            }
+        }
+    }
+
+    private fun checkServer(showResult: Boolean = false) {
+        saveServerUrl()
+        serverStatus.text = "家庭服务器  检测中…"
+        lifecycleScope.launch {
+            val online = withContext(Dispatchers.IO) { ServerClient(serverUrl.text.toString()).health() }
+            serverStatus.text = "家庭服务器  ${if (online) "Online" else "Offline"}"
+            if (showResult) toast(if (online) "Upload queued (Wi-Fi only)" else "Server unreachable; videos kept for retry")
+        }
+    }
+
+    private fun saveServerUrl() {
+        getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE).edit()
+            .putString(UploadWorker.KEY_SERVER_URL, serverUrl.text.toString().trim()).apply()
+    }
+
+    private fun setRecordingPreference(active: Boolean) {
+        getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE).edit().putBoolean("recording_active", active).apply()
+    }
+
+    private fun renderRecording(active: Boolean) {
+        updateRecordingStatus(active)
+    }
+
+    private fun updateRecordingStatus(activeOverride: Boolean? = null) {
+        if (!::recordingStatus.isInitialized) return
+        val active = activeOverride ?: (recording != null || continueRecording)
+        val status = if (active) "Recording" else "Stopped"
+        val elapsed = if ((recording != null || continueRecording) && segmentStart > 0) {
+            formatDurationSeconds(segmentDurationSeconds)
+        } else {
+            "00:00"
+        }
+        val started = manualStartTime?.let {
+            DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.getDefault()).format(Date(it))
+        } ?: "--"
+        recordingStatus.text = "录制状态  $status · 当前片段 $elapsed\n本次启动 $started · 自动 ${completedSegmentsSinceManualStart} 个 · 覆盖 ${overwrittenVideosSinceManualStart} 个"
+    }
+
+    private fun renderCharging(intent: Intent?) {
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        chargingStatus.text = "供电状态  ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
+    }
+    private fun isCharging(): Boolean {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    private fun formatVideo(video: VideoEntity): String {
+        val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM, Locale.getDefault()).format(Date(video.startTime))
+        val lock = if (video.locked) "LOCKED" else "NORMAL"
+        val error = video.errorMessage?.let { "\n$it" }.orEmpty()
+        return "$date  ${video.filename}\n${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock$error"
+    }
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1L shl 30 -> "%.1f GB".format(bytes.toDouble() / (1L shl 30))
+        bytes >= 1L shl 20 -> "%.1f MB".format(bytes.toDouble() / (1L shl 20))
+        else -> "${bytes / 1024} KB"
+    }
+    private fun formatDuration(milliseconds: Long): String {
+        val totalSeconds = (milliseconds / 1000).coerceAtLeast(0)
+        return formatDurationSeconds(totalSeconds.toInt())
+    }
+    private fun formatDurationSeconds(secondsValue: Int): String {
+        val totalSeconds = secondsValue.coerceAtLeast(0)
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return "%02d:%02d".format(minutes, seconds)
+    }
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    companion object {
+        private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
+    }
+}

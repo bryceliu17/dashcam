@@ -1,0 +1,24 @@
+# .NET
+**/bin/
+**/obj/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+server/Dashcam.Api/videos/
+
+# Node / Vite
+**/node_modules/
+web-dashboard/dist/
+*.log
+
+# Android / Gradle
+**/.gradle/
+android-app/local.properties
+android-app/app/build/
+**/.idea/
+*.iml
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/

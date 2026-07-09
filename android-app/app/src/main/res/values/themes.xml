@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.LocalDashcam" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#4D7C0F</item>
+        <item name="android:navigationBarColor">#F4F4F0</item>
+        <item name="android:statusBarColor">#F4F4F0</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

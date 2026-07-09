@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- MVP runs only on the trusted home LAN and commonly uses an HTTP IP address. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
