@@ -132,7 +132,7 @@ class PowerMonitorService : Service() {
         .setOngoing(true)
         .setContentIntent(PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            pendingIntentFlags()
         ))
         .build()
 
@@ -145,7 +145,7 @@ class PowerMonitorService : Service() {
     }
 
     private fun isBackgroundRecordingServiceRunning(): Boolean {
-        val manager = getSystemService(ActivityManager::class.java)
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         @Suppress("DEPRECATION")
         return manager.getRunningServices(Int.MAX_VALUE).any {
             it.service.className == BackgroundRecordingService::class.java.name
@@ -156,8 +156,21 @@ class PowerMonitorService : Service() {
         monitoring = false
         mainHandler.removeCallbacks(batteryPollRunnable)
         try { unregisterReceiver(powerReceiver) } catch (_: IllegalArgumentException) { }
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopForegroundCompat()
         super.onDestroy()
+    }
+
+    private fun pendingIntentFlags(): Int =
+        PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+
+    private fun stopForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
     }
 
     companion object {
