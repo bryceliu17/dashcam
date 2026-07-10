@@ -110,8 +110,9 @@ class MainActivity : ComponentActivity() {
         } else {
             toast("Camera permission is required")
         }
-        if (!pendingBackgroundStart && permissions[Manifest.permission.RECORD_AUDIO] == false) {
-            toast("Microphone permission denied; preview recording will be silent")
+        if (permissions[Manifest.permission.RECORD_AUDIO] == false) {
+            val mode = if (pendingBackgroundStart) "background" else "preview"
+            toast("Microphone permission denied; $mode recording will be silent")
         }
         pendingBackgroundStart = false
     }
@@ -334,10 +335,20 @@ class MainActivity : ComponentActivity() {
         }
         adapter.addAll(videos.map(::formatVideo))
         root.addView(videoList, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(actionButton("Back") {
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        controls.addView(actionButton("Back") {
             showingVideoList = false
             buildUi()
-        }, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(10) })
+        }, weighted())
+        controls.addView(actionButton("Delete All") {
+            confirmDeleteAllVideos()
+        }.apply {
+            isEnabled = videos.isNotEmpty()
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(10) })
         setContentView(root)
     }
 
@@ -375,7 +386,7 @@ class MainActivity : ComponentActivity() {
 
         root.addView(TextView(this).apply {
             val lock = if (video.locked) "LOCKED" else "NORMAL"
-            text = "${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock\n${file.absolutePath}"
+            text = "${recordingSource(video)} · ${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock\n${file.absolutePath}"
             textSize = 12f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, dp(10), 0, dp(10))
@@ -431,6 +442,47 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun confirmDeleteAllVideos() {
+        if (videos.isEmpty()) {
+            toast("No videos to delete")
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Delete all videos?")
+            .setMessage("This will delete ${videos.size} local videos from this app.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete All") { _, _ ->
+                val videosToDelete = videos.toList()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    var deletedCount = 0
+                    var failedCount = 0
+                    val dao = DashcamDatabase.get(this@MainActivity).videoDao()
+
+                    videosToDelete.forEach { video ->
+                        val file = File(video.localPath)
+                        val deleted = !file.exists() || file.delete()
+                        if (deleted) {
+                            dao.delete(video)
+                            deletedCount++
+                        } else {
+                            failedCount++
+                        }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        if (failedCount > 0) {
+                            toast("Deleted $deletedCount videos; $failedCount failed")
+                        } else {
+                            toast("Deleted $deletedCount videos")
+                        }
+                        showLocalVideos()
+                    }
+                }
+            }
+            .show()
+    }
+
     private fun statusRow(label: String) = TextView(this).apply {
         text = "$label  —"; textSize = 14f; setTextColor(Color.rgb(55, 65, 81));
         setPadding(dp(12), dp(12), dp(12), dp(12)); setBackgroundColor(Color.WHITE)
@@ -460,7 +512,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         pendingBackgroundStart = true
-        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        val permissions = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
         if (permissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) {
             pendingBackgroundStart = false
@@ -843,8 +895,10 @@ class MainActivity : ComponentActivity() {
         val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM, Locale.getDefault()).format(Date(video.startTime))
         val lock = if (video.locked) "LOCKED" else "NORMAL"
         val error = video.errorMessage?.let { "\n$it" }.orEmpty()
-        return "$date  ${video.filename}\n${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock$error"
+        return "$date  ${video.filename}\n${recordingSource(video)} · ${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock$error"
     }
+    private fun recordingSource(video: VideoEntity): String =
+        if (video.filename.startsWith("dashcam_bg_")) "Background" else "Foreground"
     private fun formatBytes(bytes: Long): String = when {
         bytes >= 1L shl 30 -> "%.1f GB".format(bytes.toDouble() / (1L shl 30))
         bytes >= 1L shl 20 -> "%.1f MB".format(bytes.toDouble() / (1L shl 20))

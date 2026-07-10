@@ -176,9 +176,21 @@ class BackgroundRecordingService : Service() {
         }
 
         return MediaRecorder().apply {
+            val canRecordAudio = ContextCompat.checkSelfPermission(
+                this@BackgroundRecordingService,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (canRecordAudio) {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+            }
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setOutputFile(file.absolutePath)
+            if (canRecordAudio) {
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(128_000)
+                setAudioSamplingRate(44_100)
+            }
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             setOrientationHint(getOrientationHintDegrees())
             setVideoEncodingBitRate(profile.videoBitRate)
