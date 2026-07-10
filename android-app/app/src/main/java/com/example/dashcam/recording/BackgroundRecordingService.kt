@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -50,9 +51,10 @@ class BackgroundRecordingService : Service() {
     private var currentFile: File? = null
     private var segmentStartMs = 0L
     private var continueRecording = false
+    private var stopAfterCurrentSegmentRequested = false
 
     private val rotateRunnable = Runnable {
-        if (continueRecording) stopSegment(restart = true)
+        if (continueRecording) stopSegment(restart = !stopAfterCurrentSegmentRequested)
     }
     private val statusRunnable = object : Runnable {
         override fun run() {
@@ -73,6 +75,7 @@ class BackgroundRecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopRecording()
+            ACTION_STOP_AFTER_SEGMENT -> stopAfterCurrentSegment()
             else -> startRecording()
         }
         return START_NOT_STICKY
@@ -88,6 +91,8 @@ class BackgroundRecordingService : Service() {
         }
 
         continueRecording = true
+        stopAfterCurrentSegmentRequested = false
+        PowerRecordingSettings.setBackgroundRecordingActive(this, true)
         startForeground(NOTIFICATION_ID, buildNotification("Starting background recording"))
         broadcastState(true, 0, null)
         acquireWakeLock()
@@ -102,22 +107,32 @@ class BackgroundRecordingService : Service() {
         } ?: manager.cameraIdList.first()
         activeCameraId = cameraId
 
-        manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-            override fun onOpened(camera: CameraDevice) {
-                cameraDevice = camera
-                startSegment()
-            }
+        try {
+            manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraDevice = camera
+                    startSegment()
+                }
 
-            override fun onDisconnected(camera: CameraDevice) {
-                camera.close()
-                failAndStop()
-            }
+                override fun onDisconnected(camera: CameraDevice) {
+                    Log.w(TAG, "Camera disconnected while background recording")
+                    camera.close()
+                    stopRecordingAndSaveCurrentSegment()
+                }
 
-            override fun onError(camera: CameraDevice, error: Int) {
-                camera.close()
-                failAndStop()
-            }
-        }, cameraHandler)
+                override fun onError(camera: CameraDevice, error: Int) {
+                    Log.e(TAG, "Camera open error: $error")
+                    camera.close()
+                    failAndStop()
+                }
+            }, cameraHandler)
+        } catch (error: SecurityException) {
+            Log.e(TAG, "Camera permission unavailable while starting background recording", error)
+            failAndStop()
+        } catch (error: RuntimeException) {
+            Log.e(TAG, "Unable to open camera for background recording", error)
+            failAndStop()
+        }
     }
 
     private fun startSegment() {
@@ -255,16 +270,35 @@ class BackgroundRecordingService : Service() {
             }
         }
 
-        if (restart && continueRecording) startSegment() else finishService()
+        if (restart && continueRecording && !stopAfterCurrentSegmentRequested) startSegment() else finishService()
     }
 
     private fun stopRecording() {
         continueRecording = false
+        stopAfterCurrentSegmentRequested = false
         if (recorder != null) stopSegment(restart = false) else finishService()
+    }
+
+    private fun stopRecordingAndSaveCurrentSegment() {
+        continueRecording = false
+        stopAfterCurrentSegmentRequested = false
+        if (recorder != null || currentFile != null) stopSegment(restart = false) else finishService()
+    }
+
+    private fun stopAfterCurrentSegment() {
+        if (!continueRecording) {
+            finishService()
+            return
+        }
+        stopAfterCurrentSegmentRequested = true
+        updateNotification("Stopping after current segment")
+        broadcastState(true, currentElapsedSeconds(), currentFile?.name)
+        if (recorder == null && currentFile == null) stopRecording()
     }
 
     private fun failAndStop() {
         continueRecording = false
+        stopAfterCurrentSegmentRequested = false
         currentFile?.delete()
         finishService()
     }
@@ -286,6 +320,7 @@ class BackgroundRecordingService : Service() {
         cameraDevice = null
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
+        PowerRecordingSettings.setBackgroundRecordingActive(this, false)
         broadcastState(false, 0, null)
     }
 
@@ -342,6 +377,7 @@ class BackgroundRecordingService : Service() {
     companion object {
         const val ACTION_START = "com.example.dashcam.background.START"
         const val ACTION_STOP = "com.example.dashcam.background.STOP"
+        const val ACTION_STOP_AFTER_SEGMENT = "com.example.dashcam.background.STOP_AFTER_SEGMENT"
         const val ACTION_STATE = "com.example.dashcam.background.STATE"
         const val EXTRA_ACTIVE = "active"
         const val EXTRA_ELAPSED_SECONDS = "elapsed_seconds"
@@ -349,6 +385,7 @@ class BackgroundRecordingService : Service() {
         private const val CHANNEL_ID = "dashcam_background_recording"
         private const val NOTIFICATION_ID = 2001
         private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
+        private const val TAG = "BackgroundRecordingService"
     }
 
     private fun currentElapsedSeconds(): Int =

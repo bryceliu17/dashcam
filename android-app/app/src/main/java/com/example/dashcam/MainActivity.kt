@@ -49,6 +49,8 @@ import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
+import com.example.dashcam.recording.PowerMonitorService
+import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.StoragePolicy
 import com.example.dashcam.upload.UploadWorker
@@ -72,6 +74,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var serverUrlDisplay: TextView
     private lateinit var previewRecordButton: Button
     private lateinit var backgroundRecordButton: Button
+    private lateinit var powerAutoButton: Button
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<String>
@@ -95,6 +98,7 @@ class MainActivity : ComponentActivity() {
     private var backgroundRecordingActive = false
     private var backgroundElapsedSeconds = 0
     private var backgroundFilename: String? = null
+    private var stopAfterCurrentSegment = false
     private val timerRunnable = object : Runnable {
         override fun run() {
             updateRecordingStatus()
@@ -128,6 +132,24 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) { renderCharging(intent) }
     }
 
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!PowerRecordingSettings.isPowerAutoBackgroundEnabled(this@MainActivity)) return
+            when (intent?.action) {
+                Intent.ACTION_POWER_CONNECTED -> {
+                    if (recording == null && !continueRecording && !backgroundRecordingActive &&
+                        !PowerRecordingSettings.isAnyRecordingActive(this@MainActivity)
+                    ) {
+                        startBackgroundDashcam()
+                    }
+                }
+                Intent.ACTION_POWER_DISCONNECTED -> {
+                    if (recording != null || continueRecording) requestStopAfterCurrentSegment()
+                }
+            }
+        }
+    }
+
     private val backgroundStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val wasActive = backgroundRecordingActive
@@ -137,7 +159,7 @@ class MainActivity : ComponentActivity() {
             if (backgroundRecordingActive && !wasActive) {
                 cameraProvider?.unbindAll()
             } else if (!backgroundRecordingActive && wasActive) {
-                startPreviewOnly()
+                updatePreviewAvailability()
             }
             updateBackgroundRecordButton()
             updateRecordingStatus()
@@ -146,10 +168,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        buildUi()
+        backgroundRecordingActive = PowerRecordingSettings.isBackgroundRecordingActive(this)
         val prefs = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
+        buildUi()
         serverUrl.setText(prefs.getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL))
         setRecordingPreference(false)
+        if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) PowerMonitorService.start(this)
         renderRecording(false)
         observeVideos()
         checkServer()
@@ -171,16 +195,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (::previewView.isInitialized) RecordingService.previewSurfaceProvider = previewView.surfaceProvider
+        if (::previewView.isInitialized) updatePreviewAvailability()
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, backgroundStateReceiver, IntentFilter(BackgroundRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, powerReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }, ContextCompat.RECEIVER_EXPORTED)
     }
 
     override fun onStop() {
         try { unregisterReceiver(stateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(backgroundStateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(batteryReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(powerReceiver) } catch (_: IllegalArgumentException) { }
         RecordingService.previewSurfaceProvider = null
         super.onStop()
     }
@@ -221,8 +250,7 @@ class MainActivity : ComponentActivity() {
             setBackgroundColor(Color.BLACK)
         }
         root.addView(previewView, LinearLayout.LayoutParams(-1, dp(220)).apply { topMargin = dp(14) })
-        RecordingService.previewSurfaceProvider = previewView.surfaceProvider
-        startPreviewOnly()
+        updatePreviewAvailability()
 
         val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
             .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
@@ -282,6 +310,10 @@ class MainActivity : ComponentActivity() {
         }
         backgroundControls.addView(backgroundRecordButton, LinearLayout.LayoutParams(-1, -1))
         root.addView(backgroundControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
+        powerAutoButton = actionButton(powerAutoButtonLabel()) {
+            togglePowerAutoBackground()
+        }
+        root.addView(powerAutoButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             saveServerUrl(); UploadWorker.enqueueNow(this); checkServer(showResult = true)
@@ -495,6 +527,10 @@ class MainActivity : ComponentActivity() {
     private fun weighted() = LinearLayout.LayoutParams(0, -1, 1f)
 
     private fun requestStart() {
+        if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) {
+            toast("Turn off Power Auto Background before preview recording")
+            return
+        }
         if (backgroundRecordingActive) {
             toast("Stop background recording first")
             return
@@ -532,6 +568,7 @@ class MainActivity : ComponentActivity() {
             this, Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_START)
         )
         backgroundRecordingActive = true
+        PowerRecordingSettings.setBackgroundRecordingActive(this, true)
         updateBackgroundRecordButton()
         toast("Background recording starting")
     }
@@ -539,9 +576,48 @@ class MainActivity : ComponentActivity() {
     private fun stopBackgroundDashcam() {
         startService(Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_STOP))
         backgroundRecordingActive = false
+        PowerRecordingSettings.setBackgroundRecordingActive(this, false)
         updateBackgroundRecordButton()
         toast("Stopping background recording")
     }
+
+    private fun requestStopAfterCurrentSegment() {
+        var handled = false
+        if (recording != null || continueRecording) {
+            stopAfterCurrentSegment = true
+            updateRecordingStatus()
+            handled = true
+        }
+        if (backgroundRecordingActive) {
+            startService(
+                Intent(this, BackgroundRecordingService::class.java)
+                    .setAction(BackgroundRecordingService.ACTION_STOP_AFTER_SEGMENT)
+            )
+            handled = true
+        }
+        if (handled) toast("Power disconnected; stopping after current segment")
+    }
+
+    private fun togglePowerAutoBackground() {
+        val enabled = !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
+        PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, enabled)
+        if (enabled) PowerMonitorService.start(this) else PowerMonitorService.stop(this)
+        updatePowerAutoButton()
+        updatePreviewAvailability()
+        updateRecordingStatus()
+        toast(if (enabled) "Power auto background enabled" else "Power auto background disabled")
+    }
+
+    private fun updatePowerAutoButton() {
+        if (::powerAutoButton.isInitialized) powerAutoButton.text = powerAutoButtonLabel()
+    }
+
+    private fun powerAutoButtonLabel(): String =
+        if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) {
+            "Power Auto Background: ON"
+        } else {
+            "Power Auto Background: OFF"
+        }
 
     private fun updateBackgroundRecordButton() {
         if (::backgroundRecordButton.isInitialized) {
@@ -562,6 +638,7 @@ class MainActivity : ComponentActivity() {
         manualStartTime = System.currentTimeMillis()
         completedSegmentsSinceManualStart = 0
         overwrittenVideosSinceManualStart = 0
+        stopAfterCurrentSegment = false
         continueRecording = true
         setRecordingPreference(true)
         renderRecording(true)
@@ -581,13 +658,42 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startPreviewOnly() {
-        if (!::previewView.isInitialized || recording != null || continueRecording || backgroundRecordingActive) return
+        if (!::previewView.isInitialized ||
+            recording != null ||
+            continueRecording ||
+            backgroundRecordingActive ||
+            PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) ||
+            PowerRecordingSettings.isBackgroundRecordingActive(this)
+        ) return
         ensureCameraProvider {
+            if (recording != null ||
+                continueRecording ||
+                backgroundRecordingActive ||
+                PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) ||
+                PowerRecordingSettings.isBackgroundRecordingActive(this)
+            ) return@ensureCameraProvider
             try {
                 bindCameraForPreview()
             } catch (_: Exception) {
             }
         }
+    }
+
+    private fun updatePreviewAvailability() {
+        if (!::previewView.isInitialized) return
+        val powerAutoEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
+        if (powerAutoEnabled) {
+            RecordingService.previewSurfaceProvider = null
+            previewView.isEnabled = false
+            previewView.alpha = 0.35f
+            if (recording == null && !continueRecording) cameraProvider?.unbindAll()
+            return
+        }
+
+        previewView.isEnabled = true
+        previewView.alpha = 1f
+        RecordingService.previewSurfaceProvider = previewView.surfaceProvider
+        startPreviewOnly()
     }
 
     private fun ensureCameraProvider(action: () -> Unit) {
@@ -742,6 +848,7 @@ class MainActivity : ComponentActivity() {
                         UploadWorker.enqueueNow(this@MainActivity)
                         withContext(Dispatchers.Main) {
                             if (continueRecording) completedSegmentsSinceManualStart += 1
+                            if (stopAfterCurrentSegment) continueRecording = false
                             updateRecordingStatus()
                             toast("Saved ${finishedFile.name}")
                             afterSegmentFinalized()
@@ -757,6 +864,7 @@ class MainActivity : ComponentActivity() {
                         "Recording did not produce a playable video"
                     }
                     runOnUiThread {
+                        if (stopAfterCurrentSegment) continueRecording = false
                         toast(message)
                         afterSegmentFinalized()
                     }
@@ -781,16 +889,18 @@ class MainActivity : ComponentActivity() {
         if (continueRecording) {
             startSegment()
         } else {
+            stopAfterCurrentSegment = false
             cameraProvider?.unbindAll()
             setRecordingPreference(false)
             renderRecording(false)
             mainHandler.removeCallbacks(timerRunnable)
-            startPreviewOnly()
+            updatePreviewAvailability()
         }
     }
 
     private fun stopDashcam(reason: String) {
         continueRecording = false
+        stopAfterCurrentSegment = false
         mainHandler.removeCallbacksAndMessages(null)
         val current = recording
         if (current != null) {
@@ -801,19 +911,20 @@ class MainActivity : ComponentActivity() {
             setRecordingPreference(false)
             renderRecording(false)
             mainHandler.removeCallbacks(timerRunnable)
-            startPreviewOnly()
+            updatePreviewAvailability()
             toast(reason)
         }
     }
 
     private fun failRecording(message: String) {
         continueRecording = false
+        stopAfterCurrentSegment = false
         mainHandler.removeCallbacks(timerRunnable)
         recording?.stop()
         cameraProvider?.unbindAll()
         setRecordingPreference(false)
         renderRecording(false)
-        startPreviewOnly()
+        updatePreviewAvailability()
         toast(message)
     }
 
@@ -848,7 +959,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setRecordingPreference(active: Boolean) {
-        getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE).edit().putBoolean("recording_active", active).apply()
+        PowerRecordingSettings.setForegroundRecordingActive(this, active)
     }
 
     private fun renderRecording(active: Boolean) {
@@ -858,7 +969,7 @@ class MainActivity : ComponentActivity() {
     private fun updateRecordingStatus(activeOverride: Boolean? = null) {
         if (!::recordingStatus.isInitialized) return
         val active = activeOverride ?: (recording != null || continueRecording)
-        val status = if (active) "Recording" else "Stopped"
+        val status = if (active && stopAfterCurrentSegment) "Stopping after segment" else if (active) "Recording" else "Stopped"
         val elapsed = if ((recording != null || continueRecording) && segmentStart > 0) {
             formatDurationSeconds(segmentDurationSeconds)
         } else {
@@ -876,7 +987,8 @@ class MainActivity : ComponentActivity() {
         recordingStatus.text = "录制状态  $status · 当前片段 $elapsed\n本次启动 $started · 自动 ${completedSegmentsSinceManualStart} 个 · 覆盖 ${overwrittenVideosSinceManualStart} 个$backgroundStatus"
         if (::previewRecordButton.isInitialized) {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
-            previewRecordButton.isEnabled = active || !backgroundRecordingActive
+            previewRecordButton.isEnabled = active ||
+                (!backgroundRecordingActive && !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this))
         }
         updateBackgroundRecordButton()
     }
