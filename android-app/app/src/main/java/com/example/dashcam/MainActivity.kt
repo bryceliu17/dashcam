@@ -134,6 +134,7 @@ class MainActivity : ComponentActivity() {
             backgroundRecordingActive = intent?.getBooleanExtra(BackgroundRecordingService.EXTRA_ACTIVE, false) == true
             backgroundElapsedSeconds = intent?.getIntExtra(BackgroundRecordingService.EXTRA_ELAPSED_SECONDS, 0) ?: 0
             backgroundFilename = intent?.getStringExtra(BackgroundRecordingService.EXTRA_FILENAME)
+            intent?.getStringExtra(BackgroundRecordingService.EXTRA_MESSAGE)?.takeIf { it.isNotBlank() }?.let(::toast)
             if (backgroundRecordingActive && !wasActive) {
                 cameraProvider?.unbindAll()
             } else if (!backgroundRecordingActive && wasActive) {

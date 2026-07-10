@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.hardware.Camera
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -20,6 +22,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -45,6 +48,9 @@ class BackgroundRecordingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var activeCameraId: String? = null
     private var cameraDevice: CameraDevice? = null
+    private var legacyCamera: Camera? = null
+    private var legacySurfaceTexture: SurfaceTexture? = null
+    private var legacySurface: Surface? = null
     private var captureSession: CameraCaptureSession? = null
     private var recorder: MediaRecorder? = null
     private var currentFile: File? = null
@@ -91,7 +97,31 @@ class BackgroundRecordingService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("Starting background recording"))
         broadcastState(true, 0, null)
         acquireWakeLock()
-        openCamera()
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            openLegacyCamera()
+        } else {
+            openCamera()
+        }
+    }
+
+    private fun openLegacyCamera() {
+        try {
+            legacyCamera = Camera.open(findLegacyBackCameraId()).also {
+                it.setDisplayOrientation(90)
+            }
+            startLegacySegment()
+        } catch (error: Exception) {
+            failAndStop("Background camera unavailable: ${error.message.orEmpty()}")
+        }
+    }
+
+    private fun findLegacyBackCameraId(): Int {
+        val info = Camera.CameraInfo()
+        for (id in 0 until Camera.getNumberOfCameras()) {
+            Camera.getCameraInfo(id, info)
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_BACK) return id
+        }
+        return 0
     }
 
     private fun openCamera() {
@@ -118,6 +148,41 @@ class BackgroundRecordingService : Service() {
                 failAndStop()
             }
         }, cameraHandler)
+    }
+
+    private fun startLegacySegment() {
+        val camera = legacyCamera ?: return failAndStop("Legacy camera unavailable")
+        val directory = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "dashcam").apply { mkdirs() }
+
+        scope.launch {
+            if (!StoragePolicy.prepareForRecording(this@BackgroundRecordingService, directory)) {
+                mainHandler.post { failAndStop("Storage full, background recording stopped") }
+                return@launch
+            }
+
+            val startedAt = System.currentTimeMillis()
+            val filename = SimpleDateFormat("'dashcam_bg_'yyyyMMdd_HHmmss'.mp4'", Locale.US).format(Date(startedAt))
+            val file = File(directory, filename)
+
+            mainHandler.post {
+                try {
+                    currentFile = file
+                    segmentStartMs = startedAt
+                    broadcastState(true, 0, file.name)
+                    recorder = createLegacyRecorder(file, camera).also {
+                        it.prepare()
+                        it.start()
+                    }
+                    updateNotification("Background recording")
+                    mainHandler.removeCallbacks(statusRunnable)
+                    mainHandler.post(statusRunnable)
+                    mainHandler.removeCallbacks(rotateRunnable)
+                    mainHandler.postDelayed(rotateRunnable, SEGMENT_DURATION_MS)
+                } catch (error: Exception) {
+                    failAndStop("Unable to start background recording: ${error.message.orEmpty()}")
+                }
+            }
+        }
     }
 
     private fun startSegment() {
@@ -199,6 +264,52 @@ class BackgroundRecordingService : Service() {
         }
     }
 
+    private fun createLegacyRecorder(file: File, camera: Camera): MediaRecorder {
+        val profile = if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_720P)) {
+            CamcorderProfile.get(CamcorderProfile.QUALITY_720P)
+        } else {
+            CamcorderProfile.get(CamcorderProfile.QUALITY_480P)
+        }
+        legacySurfaceTexture?.release()
+        legacySurface?.release()
+        legacySurfaceTexture = SurfaceTexture(0).apply {
+            setDefaultBufferSize(profile.videoFrameWidth, profile.videoFrameHeight)
+        }
+        legacySurface = Surface(legacySurfaceTexture)
+
+        try {
+            camera.setPreviewTexture(legacySurfaceTexture)
+            camera.startPreview()
+        } catch (_: Exception) {
+        }
+        camera.unlock()
+
+        return MediaRecorder().apply {
+            val canRecordAudio = ContextCompat.checkSelfPermission(
+                this@BackgroundRecordingService,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            setCamera(camera)
+            if (canRecordAudio) {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+            }
+            setVideoSource(MediaRecorder.VideoSource.CAMERA)
+            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            setOutputFile(file.absolutePath)
+            if (canRecordAudio) {
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(128_000)
+                setAudioSamplingRate(44_100)
+            }
+            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            setOrientationHint(90)
+            setVideoEncodingBitRate(profile.videoBitRate)
+            setVideoFrameRate(profile.videoFrameRate)
+            setVideoSize(profile.videoFrameWidth, profile.videoFrameHeight)
+            setPreviewDisplay(legacySurface)
+        }
+    }
+
     private fun getOrientationHintDegrees(): Int {
         val cameraId = activeCameraId ?: return 90
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -234,6 +345,10 @@ class BackgroundRecordingService : Service() {
         recorder?.reset()
         recorder?.release()
         recorder = null
+        try {
+            legacyCamera?.reconnect()
+        } catch (_: Exception) {
+        }
         currentFile = null
 
         if (file != null && file.exists() && file.length() > 0) {
@@ -255,7 +370,11 @@ class BackgroundRecordingService : Service() {
             }
         }
 
-        if (restart && continueRecording) startSegment() else finishService()
+        if (restart && continueRecording) {
+            if (legacyCamera != null) startLegacySegment() else startSegment()
+        } else {
+            finishService()
+        }
     }
 
     private fun stopRecording() {
@@ -263,9 +382,10 @@ class BackgroundRecordingService : Service() {
         if (recorder != null) stopSegment(restart = false) else finishService()
     }
 
-    private fun failAndStop() {
+    private fun failAndStop(message: String? = null) {
         continueRecording = false
         currentFile?.delete()
+        broadcastState(false, 0, null, message)
         finishService()
     }
 
@@ -284,6 +404,16 @@ class BackgroundRecordingService : Service() {
         currentFile = null
         cameraDevice?.close()
         cameraDevice = null
+        try {
+            legacyCamera?.stopPreview()
+        } catch (_: Exception) {
+        }
+        legacyCamera?.release()
+        legacyCamera = null
+        legacySurface?.release()
+        legacySurface = null
+        legacySurfaceTexture?.release()
+        legacySurfaceTexture = null
         releaseWakeLock()
         stopForegroundCompat()
         broadcastState(false, 0, null)
@@ -360,6 +490,7 @@ class BackgroundRecordingService : Service() {
         const val EXTRA_ACTIVE = "active"
         const val EXTRA_ELAPSED_SECONDS = "elapsed_seconds"
         const val EXTRA_FILENAME = "filename"
+        const val EXTRA_MESSAGE = "message"
         private const val CHANNEL_ID = "dashcam_background_recording"
         private const val NOTIFICATION_ID = 2001
         private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
@@ -368,10 +499,11 @@ class BackgroundRecordingService : Service() {
     private fun currentElapsedSeconds(): Int =
         if (segmentStartMs > 0) ((System.currentTimeMillis() - segmentStartMs) / 1000).toInt().coerceAtLeast(0) else 0
 
-    private fun broadcastState(active: Boolean, elapsedSeconds: Int, filename: String?) {
+    private fun broadcastState(active: Boolean, elapsedSeconds: Int, filename: String?, message: String? = null) {
         sendBroadcast(Intent(ACTION_STATE).setPackage(packageName)
             .putExtra(EXTRA_ACTIVE, active)
             .putExtra(EXTRA_ELAPSED_SECONDS, elapsedSeconds)
-            .putExtra(EXTRA_FILENAME, filename))
+            .putExtra(EXTRA_FILENAME, filename)
+            .putExtra(EXTRA_MESSAGE, message))
     }
 }
