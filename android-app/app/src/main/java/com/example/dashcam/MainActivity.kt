@@ -48,6 +48,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.network.ServerClient
+import com.example.dashcam.recording.BackgroundRecordingService
 import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.StoragePolicy
 import com.example.dashcam.upload.UploadWorker
@@ -68,6 +69,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var serverStatus: TextView
     private lateinit var storageStatus: TextView
     private lateinit var serverUrl: EditText
+    private lateinit var serverUrlDisplay: TextView
+    private lateinit var previewRecordButton: Button
+    private lateinit var backgroundRecordButton: Button
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<String>
@@ -86,6 +90,11 @@ class MainActivity : ComponentActivity() {
     private var manualStartTime: Long? = null
     private var completedSegmentsSinceManualStart = 0
     private var overwrittenVideosSinceManualStart = 0
+    private var pendingBackgroundStart = false
+    private var editingServerUrl = false
+    private var backgroundRecordingActive = false
+    private var backgroundElapsedSeconds = 0
+    private var backgroundFilename: String? = null
     private val timerRunnable = object : Runnable {
         override fun run() {
             updateRecordingStatus()
@@ -96,8 +105,15 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        if (permissions[Manifest.permission.CAMERA] == true) startDashcam()
-        else toast("Camera permission is required")
+        if (permissions[Manifest.permission.CAMERA] == true) {
+            if (pendingBackgroundStart) startBackgroundDashcam() else startDashcam()
+        } else {
+            toast("Camera permission is required")
+        }
+        if (!pendingBackgroundStart && permissions[Manifest.permission.RECORD_AUDIO] == false) {
+            toast("Microphone permission denied; preview recording will be silent")
+        }
+        pendingBackgroundStart = false
     }
 
     private val stateReceiver = object : BroadcastReceiver() {
@@ -109,6 +125,22 @@ class MainActivity : ComponentActivity() {
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) { renderCharging(intent) }
+    }
+
+    private val backgroundStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val wasActive = backgroundRecordingActive
+            backgroundRecordingActive = intent?.getBooleanExtra(BackgroundRecordingService.EXTRA_ACTIVE, false) == true
+            backgroundElapsedSeconds = intent?.getIntExtra(BackgroundRecordingService.EXTRA_ELAPSED_SECONDS, 0) ?: 0
+            backgroundFilename = intent?.getStringExtra(BackgroundRecordingService.EXTRA_FILENAME)
+            if (backgroundRecordingActive && !wasActive) {
+                cameraProvider?.unbindAll()
+            } else if (!backgroundRecordingActive && wasActive) {
+                startPreviewOnly()
+            }
+            updateBackgroundRecordButton()
+            updateRecordingStatus()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -140,11 +172,13 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         if (::previewView.isInitialized) RecordingService.previewSurfaceProvider = previewView.surfaceProvider
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, backgroundStateReceiver, IntentFilter(BackgroundRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     override fun onStop() {
         try { unregisterReceiver(stateReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(backgroundStateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(batteryReceiver) } catch (_: IllegalArgumentException) { }
         RecordingService.previewSurfaceProvider = null
         super.onStop()
@@ -187,20 +221,66 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(previewView, LinearLayout.LayoutParams(-1, dp(220)).apply { topMargin = dp(14) })
         RecordingService.previewSurfaceProvider = previewView.surfaceProvider
+        startPreviewOnly()
 
+        val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
+            .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
+            ?: UploadWorker.DEFAULT_SERVER_URL
         serverUrl = EditText(this).apply {
             hint = "http://192.168.1.50:5000"; textSize = 14f
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine(true); setPadding(dp(12), dp(10), dp(12), dp(10))
+            setText(savedServerUrl)
         }
-        root.addView(serverUrl, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(18) })
+        serverUrlDisplay = TextView(this).apply {
+            text = savedServerUrl
+            textSize = 14f
+            setTextColor(Color.rgb(31, 41, 55))
+            setSingleLine(true)
+            setPadding(dp(12), dp(14), dp(12), dp(10))
+            setBackgroundColor(Color.WHITE)
+        }
+        val serverUrlRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        serverUrlRow.addView(
+            if (editingServerUrl) serverUrl else serverUrlDisplay,
+            LinearLayout.LayoutParams(0, dp(52), 1f)
+        )
+        serverUrlRow.addView(actionButton(if (editingServerUrl) "Save" else "Edit") {
+            if (editingServerUrl) {
+                saveServerUrl()
+                editingServerUrl = false
+                buildUi()
+                checkServer()
+            } else {
+                editingServerUrl = true
+                buildUi()
+            }
+        }, LinearLayout.LayoutParams(dp(86), dp(52)).apply { marginStart = dp(8) })
+        root.addView(serverUrlRow, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(18) })
 
         val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        controls.addView(actionButton("Start Dashcam") { requestStart() }, weighted())
-        controls.addView(actionButton("Stop") {
-            stopDashcam("Stopped by user")
-        }, weighted().apply { marginStart = dp(8) })
+        previewRecordButton = actionButton(if (recording != null || continueRecording) "Stop Dashcam" else "Start Dashcam") {
+            if (recording != null || continueRecording) {
+                stopDashcam("Stopped by user")
+            } else if (!backgroundRecordingActive) {
+                requestStart()
+            }
+        }
+        controls.addView(previewRecordButton, LinearLayout.LayoutParams(-1, -1))
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(12) })
+        val backgroundControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        backgroundRecordButton = actionButton(if (backgroundRecordingActive) "Stop Background" else "Start Background") {
+            if (backgroundRecordingActive) {
+                stopBackgroundDashcam()
+            } else if (recording == null && !continueRecording) {
+                requestBackgroundStart()
+            }
+        }
+        backgroundControls.addView(backgroundRecordButton, LinearLayout.LayoutParams(-1, -1))
+        root.addView(backgroundControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             saveServerUrl(); UploadWorker.enqueueNow(this); checkServer(showResult = true)
@@ -363,13 +443,66 @@ class MainActivity : ComponentActivity() {
     private fun weighted() = LinearLayout.LayoutParams(0, -1, 1f)
 
     private fun requestStart() {
-        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (backgroundRecordingActive) {
+            toast("Stop background recording first")
+            return
+        }
+        pendingBackgroundStart = false
+        val permissions = mutableListOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
         if (permissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) startDashcam()
         else permissionLauncher.launch(permissions.toTypedArray())
     }
 
+    private fun requestBackgroundStart() {
+        if (recording != null || continueRecording) {
+            toast("Stop dashcam recording first")
+            return
+        }
+        pendingBackgroundStart = true
+        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
+        if (permissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) {
+            pendingBackgroundStart = false
+            startBackgroundDashcam()
+        } else {
+            permissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+
+    private fun startBackgroundDashcam() {
+        if (recording != null || continueRecording) {
+            toast("Stop dashcam recording first")
+            return
+        }
+        cameraProvider?.unbindAll()
+        ContextCompat.startForegroundService(
+            this, Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_START)
+        )
+        backgroundRecordingActive = true
+        updateBackgroundRecordButton()
+        toast("Background recording starting")
+    }
+
+    private fun stopBackgroundDashcam() {
+        startService(Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_STOP))
+        backgroundRecordingActive = false
+        updateBackgroundRecordButton()
+        toast("Stopping background recording")
+    }
+
+    private fun updateBackgroundRecordButton() {
+        if (::backgroundRecordButton.isInitialized) {
+            backgroundRecordButton.text = if (backgroundRecordingActive) "Stop Background" else "Start Background"
+            backgroundRecordButton.isEnabled = backgroundRecordingActive || (recording == null && !continueRecording)
+        }
+    }
+
     private fun startDashcam() {
+        if (backgroundRecordingActive) {
+            toast("Stop background recording first")
+            return
+        }
         // Monitoring-camera mode: start and stop are manual, so recording is no
         // longer blocked when the device is not charging.
         // if (!isCharging()) { toast("Connect power before starting the dashcam"); return }
@@ -386,14 +519,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startCameraAndSegment() {
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
+        ensureCameraProvider {
             try {
-                cameraProvider = future.get()
                 startSegment()
             } catch (error: Exception) {
                 failRecording("Camera unavailable: ${error.message}")
             }
+        }
+    }
+
+    private fun startPreviewOnly() {
+        if (!::previewView.isInitialized || recording != null || continueRecording || backgroundRecordingActive) return
+        ensureCameraProvider {
+            try {
+                bindCameraForPreview()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun ensureCameraProvider(action: () -> Unit) {
+        val existingProvider = cameraProvider
+        if (existingProvider != null) {
+            action()
+            return
+        }
+
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            cameraProvider = future.get()
+            action()
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -417,7 +572,12 @@ class MainActivity : ComponentActivity() {
                 val filename = SimpleDateFormat("'dashcam_'yyyyMMdd_HHmmss'.mp4'", Locale.US).format(Date(segmentStart))
                 segmentFile = File(directory, filename)
                 val options = FileOutputOptions.Builder(segmentFile!!).build()
-                recording = capture.output.prepareRecording(this@MainActivity, options)
+                val pendingRecording = capture.output.prepareRecording(this@MainActivity, options)
+                recording = if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    pendingRecording.withAudioEnabled()
+                } else {
+                    pendingRecording
+                }
                     .start(cameraExecutor) { event -> handleVideoEvent(event) }
             } catch (error: Exception) {
                 failRecording("Unable to start recording: ${error.message}")
@@ -464,6 +624,31 @@ class MainActivity : ComponentActivity() {
         }
 
         throw IllegalStateException("No supported camera recording combination: ${lastError?.message.orEmpty()}")
+    }
+
+    private fun bindCameraForPreview() {
+        val provider = cameraProvider ?: return
+        val cameras = listOf(
+            "back" to CameraSelector.DEFAULT_BACK_CAMERA,
+            "front" to CameraSelector.DEFAULT_FRONT_CAMERA
+        )
+        var lastError: Exception? = null
+
+        for ((_, selector) in cameras) {
+            if (!provider.hasCamera(selector)) continue
+            try {
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                provider.unbindAll()
+                provider.bindToLifecycle(this, selector, preview)
+                return
+            } catch (error: Exception) {
+                lastError = error
+            }
+        }
+
+        throw IllegalStateException("No supported preview camera: ${lastError?.message.orEmpty()}")
     }
 
     private fun handleVideoEvent(event: VideoRecordEvent) {
@@ -548,6 +733,7 @@ class MainActivity : ComponentActivity() {
             setRecordingPreference(false)
             renderRecording(false)
             mainHandler.removeCallbacks(timerRunnable)
+            startPreviewOnly()
         }
     }
 
@@ -563,6 +749,7 @@ class MainActivity : ComponentActivity() {
             setRecordingPreference(false)
             renderRecording(false)
             mainHandler.removeCallbacks(timerRunnable)
+            startPreviewOnly()
             toast(reason)
         }
     }
@@ -574,6 +761,7 @@ class MainActivity : ComponentActivity() {
         cameraProvider?.unbindAll()
         setRecordingPreference(false)
         renderRecording(false)
+        startPreviewOnly()
         toast(message)
     }
 
@@ -627,7 +815,18 @@ class MainActivity : ComponentActivity() {
         val started = manualStartTime?.let {
             DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.getDefault()).format(Date(it))
         } ?: "--"
-        recordingStatus.text = "录制状态  $status · 当前片段 $elapsed\n本次启动 $started · 自动 ${completedSegmentsSinceManualStart} 个 · 覆盖 ${overwrittenVideosSinceManualStart} 个"
+        val backgroundStatus = if (backgroundRecordingActive) {
+            val name = backgroundFilename?.let { " · $it" }.orEmpty()
+            "\nBackground  Recording · ${formatDurationSeconds(backgroundElapsedSeconds)}$name"
+        } else {
+            "\nBackground  Stopped"
+        }
+        recordingStatus.text = "录制状态  $status · 当前片段 $elapsed\n本次启动 $started · 自动 ${completedSegmentsSinceManualStart} 个 · 覆盖 ${overwrittenVideosSinceManualStart} 个$backgroundStatus"
+        if (::previewRecordButton.isInitialized) {
+            previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
+            previewRecordButton.isEnabled = active || !backgroundRecordingActive
+        }
+        updateBackgroundRecordButton()
     }
 
     private fun renderCharging(intent: Intent?) {
