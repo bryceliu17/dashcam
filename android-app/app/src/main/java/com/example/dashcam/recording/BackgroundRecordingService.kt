@@ -95,7 +95,7 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun openCamera() {
-        val manager = getSystemService(CameraManager::class.java)
+        val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = manager.cameraIdList.firstOrNull { id ->
             manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
                 CameraCharacteristics.LENS_FACING_BACK
@@ -201,7 +201,7 @@ class BackgroundRecordingService : Service() {
 
     private fun getOrientationHintDegrees(): Int {
         val cameraId = activeCameraId ?: return 90
-        val manager = getSystemService(CameraManager::class.java)
+        val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val characteristics = manager.getCameraCharacteristics(cameraId)
         val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
@@ -285,7 +285,7 @@ class BackgroundRecordingService : Service() {
         cameraDevice?.close()
         cameraDevice = null
         releaseWakeLock()
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopForegroundCompat()
         broadcastState(false, 0, null)
     }
 
@@ -296,23 +296,37 @@ class BackgroundRecordingService : Service() {
         .setOngoing(true)
         .setContentIntent(PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            pendingIntentFlags()
         ))
         .addAction(0, "Stop", PendingIntent.getService(
             this, 1, Intent(this, BackgroundRecordingService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            pendingIntentFlags()
         ))
         .build()
 
     private fun updateNotification(text: String) {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(NOTIFICATION_ID, buildNotification(text))
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getSystemService(NotificationManager::class.java).createNotificationChannel(
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "Dashcam background recording", NotificationManager.IMPORTANCE_LOW)
             )
+        }
+    }
+
+    private fun pendingIntentFlags(): Int =
+        PendingIntent.FLAG_UPDATE_CURRENT or
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+
+    private fun stopForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
         }
     }
 
