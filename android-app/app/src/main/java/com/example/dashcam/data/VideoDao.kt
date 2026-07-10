@@ -43,7 +43,7 @@ interface VideoDao {
     @Query("SELECT * FROM videos WHERE uploadStatus = 'Uploaded' AND locked = 0 AND uploadedAt < :before ORDER BY uploadedAt ASC")
     suspend fun cleanupCandidates(before: Long): List<VideoEntity>
 
-    @Query("SELECT * FROM videos WHERE uploadStatus = 'Uploaded' AND locked = 0 ORDER BY startTime ASC")
+    @Query("SELECT * FROM videos WHERE locked = 0 ORDER BY startTime ASC")
     suspend fun cleanupCandidatesForLocalStorage(): List<VideoEntity>
 
     @Delete suspend fun delete(video: VideoEntity)
