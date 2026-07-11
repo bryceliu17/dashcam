@@ -235,21 +235,21 @@ class MainActivity : ComponentActivity() {
             text = "LOCAL DASHCAM"; textSize = 11f; letterSpacing = .18f; setTextColor(Color.rgb(77, 124, 15))
         })
         root.addView(TextView(this).apply {
-            text = "行车记录仪"; textSize = 30f; setTextColor(Color.rgb(17, 24, 39)); setPadding(0, dp(3), 0, dp(18))
+            text = "Dashcam"; textSize = 30f; setTextColor(Color.rgb(17, 24, 39)); setPadding(0, dp(3), 0, dp(18))
         })
 
-        recordingStatus = statusRow("录制状态")
-        chargingStatus = statusRow("供电状态")
-        serverStatus = statusRow("家庭服务器")
-        storageStatus = statusRow("本地视频")
+        recordingStatus = statusRow("Recording")
+        chargingStatus = statusRow("Power")
+        serverStatus = statusRow("Home Server")
+        storageStatus = statusRow("Local Videos")
         listOf(recordingStatus, chargingStatus, serverStatus, storageStatus).forEach(root::addView)
 
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            scaleType = PreviewView.ScaleType.FIT_CENTER
             setBackgroundColor(Color.BLACK)
         }
-        root.addView(previewView, LinearLayout.LayoutParams(-1, dp(220)).apply { topMargin = dp(14) })
+        root.addView(previewView, LinearLayout.LayoutParams(-1, previewHeight()).apply { topMargin = dp(14) })
         updatePreviewAvailability()
 
         val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
@@ -338,13 +338,13 @@ class MainActivity : ComponentActivity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "本地视频"
+            text = "Local Videos"
             textSize = 24f
             setTextColor(Color.rgb(17, 24, 39))
             setPadding(0, 0, 0, dp(8))
         })
         root.addView(TextView(this).apply {
-            text = "${videos.size} 个 · ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
+            text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
             textSize = 14f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, 0, 0, dp(10))
@@ -418,7 +418,7 @@ class MainActivity : ComponentActivity() {
 
         root.addView(TextView(this).apply {
             val lock = if (video.locked) "LOCKED" else "NORMAL"
-            text = "${recordingSource(video)} · ${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock\n${file.absolutePath}"
+            text = "${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - ${video.uploadStatus} - $lock\n${file.absolutePath}"
             textSize = 12f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, dp(10), 0, dp(10))
@@ -516,7 +516,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun statusRow(label: String) = TextView(this).apply {
-        text = "$label  —"; textSize = 14f; setTextColor(Color.rgb(55, 65, 81));
+        text = "$label  --"; textSize = 14f; setTextColor(Color.rgb(55, 65, 81));
         setPadding(dp(12), dp(12), dp(12), dp(12)); setBackgroundColor(Color.WHITE)
     }
 
@@ -937,7 +937,7 @@ class MainActivity : ComponentActivity() {
                     adapter.addAll(items.map(::formatVideo))
                 }
                 if (::storageStatus.isInitialized) {
-                    storageStatus.text = "本地视频  ${items.size} 个 · ${formatBytes(items.sumOf { it.fileSizeBytes })}"
+                    storageStatus.text = "Local Videos  ${items.size} videos - ${formatBytes(items.sumOf { it.fileSizeBytes })}"
                 }
             }
         }
@@ -945,10 +945,10 @@ class MainActivity : ComponentActivity() {
 
     private fun checkServer(showResult: Boolean = false) {
         saveServerUrl()
-        serverStatus.text = "家庭服务器  检测中…"
+        serverStatus.text = "Home Server  Checking..."
         lifecycleScope.launch {
             val online = withContext(Dispatchers.IO) { ServerClient(serverUrl.text.toString()).health() }
-            serverStatus.text = "家庭服务器  ${if (online) "Online" else "Offline"}"
+            serverStatus.text = "Home Server  ${if (online) "Online" else "Offline"}"
             if (showResult) toast(if (online) "Upload queued (Wi-Fi only)" else "Server unreachable; videos kept for retry")
         }
     }
@@ -979,12 +979,12 @@ class MainActivity : ComponentActivity() {
             DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.getDefault()).format(Date(it))
         } ?: "--"
         val backgroundStatus = if (backgroundRecordingActive) {
-            val name = backgroundFilename?.let { " · $it" }.orEmpty()
-            "\nBackground  Recording · ${formatDurationSeconds(backgroundElapsedSeconds)}$name"
+            val name = backgroundFilename?.let { " - $it" }.orEmpty()
+            "\nBackground  Recording - ${formatDurationSeconds(backgroundElapsedSeconds)}$name"
         } else {
             "\nBackground  Stopped"
         }
-        recordingStatus.text = "录制状态  $status · 当前片段 $elapsed\n本次启动 $started · 自动 ${completedSegmentsSinceManualStart} 个 · 覆盖 ${overwrittenVideosSinceManualStart} 个$backgroundStatus"
+        recordingStatus.text = "Recording  $status - Current segment $elapsed\nStarted $started - Auto videos ${completedSegmentsSinceManualStart} - Overwritten ${overwrittenVideosSinceManualStart}$backgroundStatus"
         if (::previewRecordButton.isInitialized) {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
             previewRecordButton.isEnabled = active ||
@@ -995,7 +995,7 @@ class MainActivity : ComponentActivity() {
 
     private fun renderCharging(intent: Intent?) {
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-        chargingStatus.text = "供电状态  ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
+        chargingStatus.text = "Power  ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
     }
     private fun isCharging(): Boolean {
         val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -1007,7 +1007,7 @@ class MainActivity : ComponentActivity() {
         val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM, Locale.getDefault()).format(Date(video.startTime))
         val lock = if (video.locked) "LOCKED" else "NORMAL"
         val error = video.errorMessage?.let { "\n$it" }.orEmpty()
-        return "$date  ${video.filename}\n${recordingSource(video)} · ${formatDurationSeconds(video.durationSeconds)} · ${formatBytes(video.fileSizeBytes)} · ${video.uploadStatus} · $lock$error"
+        return "$date  ${video.filename}\n${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - ${video.uploadStatus} - $lock$error"
     }
     private fun recordingSource(video: VideoEntity): String =
         if (video.filename.startsWith("dashcam_bg_")) "Background" else "Foreground"
@@ -1026,6 +1026,13 @@ class MainActivity : ComponentActivity() {
         val seconds = totalSeconds % 60
         return "%02d:%02d".format(minutes, seconds)
     }
+
+    private fun previewHeight(): Int {
+        val horizontalPadding = dp(40)
+        val availableWidth = (resources.displayMetrics.widthPixels - horizontalPadding).coerceAtLeast(dp(160))
+        return (availableWidth * 9f / 16f).toInt()
+    }
+
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
