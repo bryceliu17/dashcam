@@ -10,11 +10,7 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 
 class VolumeKeyAccessibilityService : AccessibilityService() {
-    private var volumeUpDown = false
-    private var volumeDownDown = false
-    private var volumeUpTime = 0L
-    private var volumeDownTime = 0L
-    private var triggeredForCurrentPress = false
+    private var lastVolumeUpTime = 0L
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
 
@@ -30,49 +26,26 @@ class VolumeKeyAccessibilityService : AccessibilityService() {
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (!PowerRecordingSettings.isVolumeKeyStartEnabled(this)) return false
 
-        val isVolumeKey = event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
-            event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
-        if (!isVolumeKey) return false
+        if (event.keyCode != KeyEvent.KEYCODE_VOLUME_UP) return false
 
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            Log.i(TAG, "Volume key down: ${KeyEvent.keyCodeToString(event.keyCode)}")
-        }
-
-        when (event.action) {
-            KeyEvent.ACTION_DOWN -> handleVolumeDown(event)
-            KeyEvent.ACTION_UP -> handleVolumeUp(event)
+            handleVolumeUpDown(event)
         }
         return true
     }
 
-    private fun handleVolumeDown(event: KeyEvent) {
-        if (event.repeatCount > 0) return
-
+    private fun handleVolumeUpDown(event: KeyEvent) {
         val eventTime = event.eventTime
-        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            volumeUpDown = true
-            volumeUpTime = eventTime
-        } else {
-            volumeDownDown = true
-            volumeDownTime = eventTime
-        }
+        val isDoublePress = lastVolumeUpTime > 0L &&
+            eventTime - lastVolumeUpTime in 1..DOUBLE_PRESS_WINDOW_MS
+        Log.i(TAG, "Volume up pressed; doublePress=$isDoublePress")
 
-        val pressedTogether = volumeUpTime > 0L &&
-            volumeDownTime > 0L &&
-            kotlin.math.abs(volumeUpTime - volumeDownTime) <= COMBO_WINDOW_MS
-        if (pressedTogether && !triggeredForCurrentPress) {
-            triggeredForCurrentPress = true
+        if (isDoublePress) {
+            lastVolumeUpTime = 0L
             startBackgroundRecording()
-        }
-    }
-
-    private fun handleVolumeUp(event: KeyEvent) {
-        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            volumeUpDown = false
         } else {
-            volumeDownDown = false
+            lastVolumeUpTime = eventTime
         }
-        if (!volumeUpDown && !volumeDownDown) triggeredForCurrentPress = false
     }
 
     private fun startBackgroundRecording() {
@@ -80,14 +53,14 @@ class VolumeKeyAccessibilityService : AccessibilityService() {
         if (PowerRecordingSettings.isAnyRecordingActive(this)) return
 
         try {
-            Log.i(TAG, "Volume key combo detected; starting background recording")
+            Log.i(TAG, "Volume up double-press detected; starting background recording")
             ContextCompat.startForegroundService(
                 this,
                 Intent(this, BackgroundRecordingService::class.java)
                     .setAction(BackgroundRecordingService.ACTION_START)
             )
             PowerRecordingSettings.setBackgroundRecordingActive(this, true)
-            Toast.makeText(this, "Volume keys started background recording", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Volume up double-press started background recording", Toast.LENGTH_SHORT).show()
         } catch (error: RuntimeException) {
             PowerRecordingSettings.setBackgroundRecordingActive(this, false)
             Toast.makeText(this, "Unable to start background recording", Toast.LENGTH_LONG).show()
@@ -95,7 +68,7 @@ class VolumeKeyAccessibilityService : AccessibilityService() {
     }
 
     companion object {
-        private const val COMBO_WINDOW_MS = 700L
+        private const val DOUBLE_PRESS_WINDOW_MS = 700L
         private const val TAG = "VolumeKeyStart"
     }
 }

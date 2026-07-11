@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">Local Dashcam</string>
-    <string name="volume_key_accessibility_label">Dashcam Volume Key Start</string>
-    <string name="volume_key_accessibility_description">Start dashcam background recording when volume up and volume down are pressed together.</string>
+    <string name="volume_key_accessibility_label">Dashcam Volume Up Double-Press</string>
+    <string name="volume_key_accessibility_description">Start dashcam background recording when volume up is pressed twice quickly.</string>
 </resources>

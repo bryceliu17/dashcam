@@ -254,6 +254,7 @@ class MainActivity : ComponentActivity() {
         serverStatus = statusRow("Home Server")
         storageStatus = statusRow("Local Videos")
         listOf(recordingStatus, chargingStatus, serverStatus, storageStatus).forEach(root::addView)
+        updateStorageStatus()
 
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -548,7 +549,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (PowerRecordingSettings.isVolumeKeyStartEnabled(this)) {
-            toast("Turn off Volume Key Start before preview recording")
+            toast("Turn off Volume Up Double-Press before preview recording")
             return
         }
         if (backgroundRecordingActive) {
@@ -640,10 +641,10 @@ class MainActivity : ComponentActivity() {
         updatePreviewAvailability()
         updateRecordingStatus()
         if (enabled && !isVolumeKeyAccessibilityEnabled()) {
-            toast("Enable Dashcam Volume Key Start in Accessibility settings")
+            toast("Enable Dashcam Volume Up Double-Press in Accessibility settings")
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         } else {
-            toast(if (enabled) "Volume key start enabled" else "Volume key start disabled")
+            toast(if (enabled) "Volume up double-press enabled" else "Volume up double-press disabled")
         }
     }
 
@@ -669,9 +670,9 @@ class MainActivity : ComponentActivity() {
 
     private fun volumeKeyButtonLabel(): String =
         if (PowerRecordingSettings.isVolumeKeyStartEnabled(this)) {
-            "Volume Key Start: ON"
+            "Volume Up Double-Press: ON"
         } else {
-            "Volume Key Start: OFF"
+            "Volume Up Double-Press: OFF"
         }
 
     private fun isVolumeKeyAccessibilityEnabled(): Boolean {
@@ -1004,10 +1005,15 @@ class MainActivity : ComponentActivity() {
                     adapter.addAll(items.map(::formatVideo))
                 }
                 if (::storageStatus.isInitialized) {
-                    storageStatus.text = "Local Videos  ${items.size} videos - ${formatBytes(items.sumOf { it.fileSizeBytes })}"
+                    updateStorageStatus()
                 }
             }
         }
+    }
+
+    private fun updateStorageStatus() {
+        if (!::storageStatus.isInitialized) return
+        storageStatus.text = "Local Videos  ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
     }
 
     private fun checkServer(showResult: Boolean = false) {
@@ -1051,7 +1057,7 @@ class MainActivity : ComponentActivity() {
         } else {
             "\nBackground  Stopped"
         }
-        recordingStatus.text = "Recording  $status - Current segment $elapsed\nStarted $started - Auto videos ${completedSegmentsSinceManualStart} - Overwritten ${overwrittenVideosSinceManualStart}$backgroundStatus"
+        recordingStatus.text = "Recording  $status - Current segment $elapsed\nStarted at $started - Auto-generated clips ${completedSegmentsSinceManualStart} - Overwritten clips ${overwrittenVideosSinceManualStart}$backgroundStatus"
         if (::previewRecordButton.isInitialized) {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
             previewRecordButton.isEnabled = active ||
