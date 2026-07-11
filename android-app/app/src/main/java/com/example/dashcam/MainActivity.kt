@@ -47,6 +47,8 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.network.ServerClient
@@ -329,7 +331,7 @@ class MainActivity : ComponentActivity() {
         root.addView(volumeKeyButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
-            saveServerUrl(); UploadWorker.enqueueNow(this); checkServer(showResult = true)
+            startManualUpload()
         }, weighted())
         secondaryControls.addView(actionButton("Local Videos") {
             showLocalVideos()
@@ -1041,6 +1043,20 @@ class MainActivity : ComponentActivity() {
             val online = withContext(Dispatchers.IO) { ServerClient(serverUrl.text.toString()).health() }
             serverStatus.text = "Home Server: ${if (online) "Online" else "Offline"}"
             if (showResult) toast(if (online) "Upload queued (Wi-Fi only)" else "Server unreachable; videos kept for retry")
+        }
+    }
+
+    private fun startManualUpload() {
+        saveServerUrl()
+        val workId = UploadWorker.enqueueManual(this)
+        toast("Upload started (Wi-Fi only)")
+        WorkManager.getInstance(this).getWorkInfoByIdLiveData(workId).observe(this) { info ->
+            when (info?.state) {
+                WorkInfo.State.SUCCEEDED -> toast(info.outputData.getString(UploadWorker.KEY_MESSAGE) ?: "Upload complete")
+                WorkInfo.State.FAILED -> toast(info.outputData.getString(UploadWorker.KEY_ERROR) ?: "Upload failed")
+                WorkInfo.State.CANCELLED -> toast("Upload cancelled")
+                else -> Unit
+            }
         }
     }
 
