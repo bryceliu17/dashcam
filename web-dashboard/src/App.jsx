@@ -14,7 +14,7 @@ const formatDuration = (seconds = 0) => {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-const formatDate = (value) => new Intl.DateTimeFormat('zh-CN', {
+const formatDate = (value) => new Intl.DateTimeFormat('en-GB', {
   month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
 }).format(new Date(value))
 
@@ -22,7 +22,7 @@ async function api(path, options) {
   const response = await fetch(`${API}${path}`, options)
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(body.error || `请求失败 (${response.status})`)
+    throw new Error(body.error || `Request failed (${response.status})`)
   }
   return response.status === 204 ? null : response.json()
 }
@@ -87,7 +87,7 @@ export default function App() {
   }
 
   const remove = async (video) => {
-    if (!window.confirm(`永久删除 ${video.originalFilename || video.filename}？`)) return
+    if (!window.confirm(`Permanently delete ${video.originalFilename || video.filename}?`)) return
     try {
       await api(`/api/videos/${video.id}`, { method: 'DELETE' })
       if (selected?.id === video.id) setSelected(null)
@@ -97,57 +97,57 @@ export default function App() {
 
   return <div className="shell">
     <header>
-      <div className="brand"><span className="brand-mark">DC</span><div><strong>Dashcam Archive</strong><small>本地行车记录仪视频库</small></div></div>
+      <div className="brand"><span className="brand-mark">DC</span><div><strong>Dashcam Archive</strong><small>Local dashcam video library</small></div></div>
       <div className={`status ${online === true ? 'online' : online === false ? 'offline' : ''}`}>
-        <span /> {online === true ? '服务器在线' : online === false ? '服务器离线' : '正在检测'}
+        <span /> {online === true ? 'Server online' : online === false ? 'Server offline' : 'Checking server'}
       </div>
     </header>
 
     <main>
       <section className="hero">
-        <div><p className="eyebrow">LOCAL STORAGE</p><h1>行车影像，一处归档。</h1><p>浏览、保护和管理旧手机自动上传的视频片段。</p></div>
-        <button className="refresh" onClick={refresh} disabled={loading}><Icon name="refresh" />刷新</button>
+        <div><p className="eyebrow">LOCAL STORAGE</p><h1>Your dashcam archive.</h1><p>Browse, protect, and manage video clips uploaded from your phone.</p></div>
+        <button className="refresh" onClick={refresh} disabled={loading}><Icon name="refresh" />Refresh</button>
       </section>
 
       <section className="metrics">
-        <article><span>视频总数</span><strong>{storage?.totalVideoCount ?? '—'}</strong><small>已归档片段</small></article>
-        <article><span>已用空间</span><strong>{storage ? formatBytes(storage.totalSizeBytes) : '—'}</strong><small>上限 {storage ? formatBytes(storage.maxStorageBytes) : '—'}</small></article>
-        <article className="capacity"><span>存储容量</span><strong>{storagePercent.toFixed(1)}%</strong><div><i style={{ width: `${storagePercent}%` }} /></div><small>剩余 {storage ? formatBytes(storage.availableSpaceBytes) : '—'}</small></article>
+        <article><span>Total videos</span><strong>{storage?.totalVideoCount ?? '-'}</strong><small>Archived clips</small></article>
+        <article><span>Storage used</span><strong>{storage ? formatBytes(storage.totalSizeBytes) : '-'}</strong><small>Limit {storage ? formatBytes(storage.maxStorageBytes) : '-'}</small></article>
+        <article className="capacity"><span>Storage capacity</span><strong>{storagePercent.toFixed(1)}%</strong><div><i style={{ width: `${storagePercent}%` }} /></div><small>{storage ? formatBytes(storage.availableSpaceBytes) : '-'} available</small></article>
       </section>
 
       {error && <div className="error">{error}</div>}
 
       <section className="archive">
-        <div className="section-head"><div><p className="eyebrow">VIDEO ARCHIVE</p><h2>视频记录</h2></div><div className="filters">
-          <input type="date" value={date} onChange={e => setDate(e.target.value)} aria-label="按日期筛选" />
-          <select value={lockFilter} onChange={e => setLockFilter(e.target.value)} aria-label="按锁定状态筛选">
-            <option value="all">全部状态</option><option value="true">已锁定</option><option value="false">未锁定</option>
+        <div className="section-head"><div><p className="eyebrow">VIDEO ARCHIVE</p><h2>Video recordings</h2></div><div className="filters">
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} aria-label="Filter by date" />
+          <select value={lockFilter} onChange={e => setLockFilter(e.target.value)} aria-label="Filter by lock status">
+            <option value="all">All statuses</option><option value="true">Locked</option><option value="false">Unlocked</option>
           </select>
         </div></div>
 
-        <div className="table-wrap"><table><thead><tr><th>录制时间</th><th>文件</th><th>时长</th><th>大小</th><th>状态</th><th>操作</th></tr></thead>
+        <div className="table-wrap"><table><thead><tr><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>{videos.map(video => <tr key={video.id}>
             <td>{formatDate(video.startTime)}</td>
             <td className="file"><span>{video.originalFilename || video.filename}</span><small>#{video.id}</small></td>
             <td>{formatDuration(video.durationSeconds)}</td><td>{formatBytes(video.fileSizeBytes)}</td>
-            <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? '已锁定' : '普通'}</span></td>
+            <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? 'Locked' : 'Unlocked'}</span></td>
             <td><div className="actions">
-              <button title="播放" onClick={() => setSelected(video)}><Icon name="play" /></button>
-              <a title="下载" href={`${API}/api/videos/${video.id}/download`}><Icon name="download" /></a>
-              <button title={video.locked ? '解锁' : '锁定'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
-              <button className="danger" title="删除" onClick={() => remove(video)}><Icon name="trash" /></button>
+              <button title="Play" onClick={() => setSelected(video)}><Icon name="play" /></button>
+              <a title="Download" href={`${API}/api/videos/${video.id}/download`}><Icon name="download" /></a>
+              <button title={video.locked ? 'Unlock' : 'Lock'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
+              <button className="danger" title="Delete" onClick={() => remove(video)}><Icon name="trash" /></button>
             </div></td>
           </tr>)}</tbody></table>
-          {!loading && videos.length === 0 && <div className="empty"><span>00:00</span><h3>还没有视频</h3><p>手机完成首次上传后，视频会出现在这里。</p></div>}
-          {loading && <div className="empty"><div className="spinner" /><p>正在读取视频库…</p></div>}
+          {!loading && videos.length === 0 && <div className="empty"><span>00:00</span><h3>No videos yet</h3><p>Videos will appear here after the phone completes its first upload.</p></div>}
+          {loading && <div className="empty"><div className="spinner" /><p>Loading video library...</p></div>}
         </div>
       </section>
     </main>
 
     {selected && <div className="modal" onMouseDown={() => setSelected(null)}><div className="player" onMouseDown={e => e.stopPropagation()}>
-      <div><strong>{selected.originalFilename || selected.filename}</strong><button onClick={() => setSelected(null)}>×</button></div>
+      <div><strong>{selected.originalFilename || selected.filename}</strong><button onClick={() => setSelected(null)}>X</button></div>
       <video controls autoPlay src={`${API}/api/videos/${selected.id}/stream`} />
-      <p>{formatDate(selected.startTime)} · {formatDuration(selected.durationSeconds)} · {formatBytes(selected.fileSizeBytes)}</p>
+      <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)}</p>
     </div></div>}
   </div>
 }
