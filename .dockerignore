@@ -1,0 +1,14 @@
+.git
+.agents
+**/bin
+**/obj
+**/node_modules
+**/.gradle
+**/build
+web-dashboard/dist
+server/Dashcam.Api/videos
+*.db
+*.db-shm
+*.db-wal
+*.log
+
