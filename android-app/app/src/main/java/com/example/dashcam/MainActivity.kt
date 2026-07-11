@@ -157,11 +157,7 @@ class MainActivity : ComponentActivity() {
             backgroundElapsedSeconds = intent?.getIntExtra(BackgroundRecordingService.EXTRA_ELAPSED_SECONDS, 0) ?: 0
             backgroundFilename = intent?.getStringExtra(BackgroundRecordingService.EXTRA_FILENAME)
             intent?.getStringExtra(BackgroundRecordingService.EXTRA_MESSAGE)?.takeIf { it.isNotBlank() }?.let(::toast)
-            if (backgroundRecordingActive && !wasActive) {
-                cameraProvider?.unbindAll()
-            } else if (!backgroundRecordingActive && wasActive) {
-                updatePreviewAvailability()
-            }
+            if (backgroundRecordingActive != wasActive) updatePreviewAvailability()
             updateBackgroundRecordButton()
             updateRecordingStatus()
         }
@@ -564,13 +560,28 @@ class MainActivity : ComponentActivity() {
             toast("Stop dashcam recording first")
             return
         }
-        cameraProvider?.unbindAll()
-        ContextCompat.startForegroundService(
-            this, Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_START)
-        )
         backgroundRecordingActive = true
         PowerRecordingSettings.setBackgroundRecordingActive(this, true)
+        updatePreviewAvailability()
         updateBackgroundRecordButton()
+        updateRecordingStatus()
+        mainHandler.postDelayed({
+            if (!backgroundRecordingActive || recording != null || continueRecording) return@postDelayed
+            try {
+                ContextCompat.startForegroundService(
+                    this,
+                    Intent(this, BackgroundRecordingService::class.java)
+                        .setAction(BackgroundRecordingService.ACTION_START)
+                )
+            } catch (error: RuntimeException) {
+                backgroundRecordingActive = false
+                PowerRecordingSettings.setBackgroundRecordingActive(this, false)
+                updatePreviewAvailability()
+                updateBackgroundRecordButton()
+                updateRecordingStatus()
+                toast("Unable to start background recording")
+            }
+        }, backgroundCameraReleaseDelayMs())
         toast("Background recording starting")
     }
 
@@ -578,7 +589,9 @@ class MainActivity : ComponentActivity() {
         startService(Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_STOP))
         backgroundRecordingActive = false
         PowerRecordingSettings.setBackgroundRecordingActive(this, false)
+        updatePreviewAvailability()
         updateBackgroundRecordButton()
+        updateRecordingStatus()
         toast("Stopping background recording")
     }
 
@@ -683,7 +696,8 @@ class MainActivity : ComponentActivity() {
     private fun updatePreviewAvailability() {
         if (!::previewView.isInitialized) return
         val powerAutoEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
-        if (powerAutoEnabled) {
+        val backgroundActive = backgroundRecordingActive || PowerRecordingSettings.isBackgroundRecordingActive(this)
+        if (powerAutoEnabled || backgroundActive) {
             RecordingService.previewSurfaceProvider = null
             previewView.isEnabled = false
             previewView.alpha = 0.35f
@@ -696,6 +710,9 @@ class MainActivity : ComponentActivity() {
         RecordingService.previewSurfaceProvider = previewView.surfaceProvider
         startPreviewOnly()
     }
+
+    private fun backgroundCameraReleaseDelayMs(): Long =
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) 900L else 200L
 
     private fun ensureCameraProvider(action: () -> Unit) {
         val existingProvider = cameraProvider
