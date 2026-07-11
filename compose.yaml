@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: server/Dashcam.Api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      ASPNETCORE_URLS: http://+:5000
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__DashcamDatabase: Data Source=/data/dashcam.db
+      VideoStoragePath: /data/videos
+      MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-200}
+    volumes:
+      - "${DASHCAM_DATA_PATH:-D:/DashcamData}:/data"
+
+  web:
+    build:
+      context: .
+      dockerfile: web-dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
