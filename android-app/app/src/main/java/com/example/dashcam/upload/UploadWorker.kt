@@ -12,6 +12,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.Constraints
+import androidx.work.workDataOf
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.network.ServerClient
 import kotlinx.coroutines.Dispatchers
@@ -20,28 +21,42 @@ import java.util.concurrent.TimeUnit
 
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        if (!isWifiConnected()) return@withContext Result.retry()
+        val manual = inputData.getBoolean(KEY_MANUAL, false)
+        if (!isWifiConnected()) return@withContext failureOrRetry(manual, "Connect to Wi-Fi before uploading")
 
         val dao = DashcamDatabase.get(applicationContext).videoDao()
         dao.recoverInterruptedUploads(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10))
         val serverUrl = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
         val client = ServerClient(serverUrl)
-        if (!client.health()) return@withContext Result.retry()
+        if (!client.health()) return@withContext failureOrRetry(manual, "Server is unreachable: $serverUrl")
 
         var failed = false
-        for (video in dao.uploadCandidates()) {
+        var uploaded = 0
+        var lastError = "Upload failed"
+        val candidates = dao.uploadCandidates()
+        for (video in candidates) {
             if (dao.markUploading(video.id, System.currentTimeMillis()) == 0) continue
             try {
                 val serverId = client.upload(video)
                 dao.markUploaded(video.id, serverId, System.currentTimeMillis())
+                uploaded += 1
             } catch (error: Exception) {
                 failed = true
-                dao.markFailed(video.id, error.message?.take(500) ?: "Upload failed", System.currentTimeMillis())
+                lastError = error.message?.take(500) ?: "Upload failed"
+                dao.markFailed(video.id, lastError, System.currentTimeMillis())
             }
         }
-        if (failed) Result.retry() else Result.success()
+        when {
+            failed && manual -> Result.failure(workDataOf(KEY_ERROR to lastError))
+            failed -> Result.retry()
+            candidates.isEmpty() -> Result.success(workDataOf(KEY_MESSAGE to "No pending videos to upload"))
+            else -> Result.success(workDataOf(KEY_MESSAGE to "Uploaded $uploaded video(s)"))
+        }
     }
+
+    private fun failureOrRetry(manual: Boolean, message: String): Result =
+        if (manual) Result.failure(workDataOf(KEY_ERROR to message)) else Result.retry()
 
     private fun isWifiConnected(): Boolean {
         val manager = applicationContext.getSystemService(ConnectivityManager::class.java)
@@ -57,6 +72,9 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         const val DEFAULT_SERVER_URL = "http://192.168.1.50:5000"
         private const val UNIQUE_NOW = "dashcam-upload-now"
         private const val UNIQUE_PERIODIC = "dashcam-upload-periodic"
+        const val KEY_MESSAGE = "upload_message"
+        const val KEY_ERROR = "upload_error"
+        private const val KEY_MANUAL = "manual_upload"
 
         private val wifiConstraint = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.UNMETERED).build()
@@ -67,6 +85,15 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.KEEP, request)
+        }
+
+        fun enqueueManual(context: Context): java.util.UUID {
+            val request = OneTimeWorkRequestBuilder<UploadWorker>()
+                .setInputData(workDataOf(KEY_MANUAL to true))
+                .setConstraints(wifiConstraint)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.REPLACE, request)
+            return request.id
         }
 
         fun schedulePeriodic(context: Context) {
