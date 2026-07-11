@@ -533,7 +533,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun statusRow(label: String) = TextView(this).apply {
-        text = "$label  --"; textSize = 14f; setTextColor(Color.rgb(55, 65, 81));
+        text = "$label: --"; textSize = 14f; setTextColor(Color.rgb(55, 65, 81));
         setPadding(dp(12), dp(12), dp(12), dp(12)); setBackgroundColor(Color.WHITE)
     }
 
@@ -1013,15 +1013,15 @@ class MainActivity : ComponentActivity() {
 
     private fun updateStorageStatus() {
         if (!::storageStatus.isInitialized) return
-        storageStatus.text = "Local Videos  ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
+        storageStatus.text = "Local Videos: ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
     }
 
     private fun checkServer(showResult: Boolean = false) {
         saveServerUrl()
-        serverStatus.text = "Home Server  Checking..."
+        serverStatus.text = "Home Server: Checking..."
         lifecycleScope.launch {
             val online = withContext(Dispatchers.IO) { ServerClient(serverUrl.text.toString()).health() }
-            serverStatus.text = "Home Server  ${if (online) "Online" else "Offline"}"
+            serverStatus.text = "Home Server: ${if (online) "Online" else "Offline"}"
             if (showResult) toast(if (online) "Upload queued (Wi-Fi only)" else "Server unreachable; videos kept for retry")
         }
     }
@@ -1053,11 +1053,11 @@ class MainActivity : ComponentActivity() {
         } ?: "--"
         val backgroundStatus = if (backgroundRecordingActive) {
             val name = backgroundFilename?.let { " - $it" }.orEmpty()
-            "\nBackground  Recording - ${formatDurationSeconds(backgroundElapsedSeconds)}$name"
+            "\nBackground: Recording - ${formatDurationSeconds(backgroundElapsedSeconds)}$name"
         } else {
-            "\nBackground  Stopped"
+            "\nBackground: Stopped"
         }
-        recordingStatus.text = "Recording  $status - Current segment $elapsed\nStarted at $started - Auto-generated clips ${completedSegmentsSinceManualStart} - Overwritten clips ${overwrittenVideosSinceManualStart}$backgroundStatus"
+        recordingStatus.text = "Recording: $status - Current segment: $elapsed\nStarted at: $started - Auto-generated clips: ${completedSegmentsSinceManualStart} - Overwritten clips: ${overwrittenVideosSinceManualStart}$backgroundStatus"
         if (::previewRecordButton.isInitialized) {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
             previewRecordButton.isEnabled = active ||
@@ -1071,7 +1071,7 @@ class MainActivity : ComponentActivity() {
 
     private fun renderCharging(intent: Intent?) {
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-        chargingStatus.text = "Power  ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
+        chargingStatus.text = "Power: ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
     }
     private fun isCharging(): Boolean {
         val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
