@@ -3,6 +3,7 @@ package com.example.dashcam
 import android.Manifest
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -14,6 +15,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -53,6 +55,7 @@ import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.StoragePolicy
+import com.example.dashcam.recording.VolumeKeyAccessibilityService
 import com.example.dashcam.upload.UploadWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -75,6 +78,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var previewRecordButton: Button
     private lateinit var backgroundRecordButton: Button
     private lateinit var powerAutoButton: Button
+    private lateinit var volumeKeyButton: Button
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<String>
@@ -196,6 +200,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         if (::previewView.isInitialized) updatePreviewAvailability()
+        updateModeButtons()
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, backgroundStateReceiver, IntentFilter(BackgroundRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -203,6 +208,12 @@ class MainActivity : ComponentActivity() {
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
         }, ContextCompat.RECEIVER_EXPORTED)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateModeButtons()
+        updatePreviewAvailability()
     }
 
     override fun onStop() {
@@ -314,6 +325,10 @@ class MainActivity : ComponentActivity() {
             togglePowerAutoBackground()
         }
         root.addView(powerAutoButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        volumeKeyButton = actionButton(volumeKeyButtonLabel()) {
+            toggleVolumeKeyStart()
+        }
+        root.addView(volumeKeyButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             saveServerUrl(); UploadWorker.enqueueNow(this); checkServer(showResult = true)
@@ -324,6 +339,7 @@ class MainActivity : ComponentActivity() {
         root.addView(secondaryControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         scroll.addView(root)
         setContentView(scroll)
+        updateModeButtons()
         updateRecordingStatus()
     }
 
@@ -531,6 +547,10 @@ class MainActivity : ComponentActivity() {
             toast("Turn off Power Auto Background before preview recording")
             return
         }
+        if (PowerRecordingSettings.isVolumeKeyStartEnabled(this)) {
+            toast("Turn off Volume Key Start before preview recording")
+            return
+        }
         if (backgroundRecordingActive) {
             toast("Stop background recording first")
             return
@@ -600,16 +620,44 @@ class MainActivity : ComponentActivity() {
 
     private fun togglePowerAutoBackground() {
         val enabled = !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
+        if (enabled) PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
         PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, enabled)
         if (enabled) PowerMonitorService.start(this) else PowerMonitorService.stop(this)
-        updatePowerAutoButton()
+        updateModeButtons()
         updatePreviewAvailability()
         updateRecordingStatus()
         toast(if (enabled) "Power auto background enabled" else "Power auto background disabled")
     }
 
-    private fun updatePowerAutoButton() {
-        if (::powerAutoButton.isInitialized) powerAutoButton.text = powerAutoButtonLabel()
+    private fun toggleVolumeKeyStart() {
+        val enabled = !PowerRecordingSettings.isVolumeKeyStartEnabled(this)
+        if (enabled) {
+            PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
+            PowerMonitorService.stop(this)
+        }
+        PowerRecordingSettings.setVolumeKeyStartEnabled(this, enabled)
+        updateModeButtons()
+        updatePreviewAvailability()
+        updateRecordingStatus()
+        if (enabled && !isVolumeKeyAccessibilityEnabled()) {
+            toast("Enable Dashcam Volume Key Start in Accessibility settings")
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        } else {
+            toast(if (enabled) "Volume key start enabled" else "Volume key start disabled")
+        }
+    }
+
+    private fun updateModeButtons() {
+        val powerEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
+        val volumeEnabled = PowerRecordingSettings.isVolumeKeyStartEnabled(this)
+        if (::powerAutoButton.isInitialized) {
+            powerAutoButton.text = powerAutoButtonLabel()
+            powerAutoButton.isEnabled = powerEnabled || !volumeEnabled
+        }
+        if (::volumeKeyButton.isInitialized) {
+            volumeKeyButton.text = volumeKeyButtonLabel()
+            volumeKeyButton.isEnabled = volumeEnabled || !powerEnabled
+        }
     }
 
     private fun powerAutoButtonLabel(): String =
@@ -618,6 +666,22 @@ class MainActivity : ComponentActivity() {
         } else {
             "Power Auto Background: OFF"
         }
+
+    private fun volumeKeyButtonLabel(): String =
+        if (PowerRecordingSettings.isVolumeKeyStartEnabled(this)) {
+            "Volume Key Start: ON"
+        } else {
+            "Volume Key Start: OFF"
+        }
+
+    private fun isVolumeKeyAccessibilityEnabled(): Boolean {
+        val expected = ComponentName(this, VolumeKeyAccessibilityService::class.java).flattenToString()
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ).orEmpty()
+        return enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
+    }
 
     private fun updateBackgroundRecordButton() {
         if (::backgroundRecordButton.isInitialized) {
@@ -663,6 +727,7 @@ class MainActivity : ComponentActivity() {
             continueRecording ||
             backgroundRecordingActive ||
             PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) ||
+            PowerRecordingSettings.isVolumeKeyStartEnabled(this) ||
             PowerRecordingSettings.isBackgroundRecordingActive(this)
         ) return
         ensureCameraProvider {
@@ -670,6 +735,7 @@ class MainActivity : ComponentActivity() {
                 continueRecording ||
                 backgroundRecordingActive ||
                 PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) ||
+                PowerRecordingSettings.isVolumeKeyStartEnabled(this) ||
                 PowerRecordingSettings.isBackgroundRecordingActive(this)
             ) return@ensureCameraProvider
             try {
@@ -682,7 +748,8 @@ class MainActivity : ComponentActivity() {
     private fun updatePreviewAvailability() {
         if (!::previewView.isInitialized) return
         val powerAutoEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
-        if (powerAutoEnabled) {
+        val volumeKeyStartEnabled = PowerRecordingSettings.isVolumeKeyStartEnabled(this)
+        if (powerAutoEnabled || volumeKeyStartEnabled) {
             RecordingService.previewSurfaceProvider = null
             previewView.isEnabled = false
             previewView.alpha = 0.35f
@@ -988,9 +1055,12 @@ class MainActivity : ComponentActivity() {
         if (::previewRecordButton.isInitialized) {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
             previewRecordButton.isEnabled = active ||
-                (!backgroundRecordingActive && !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this))
+                (!backgroundRecordingActive &&
+                    !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) &&
+                    !PowerRecordingSettings.isVolumeKeyStartEnabled(this))
         }
         updateBackgroundRecordButton()
+        updateModeButtons()
     }
 
     private fun renderCharging(intent: Intent?) {
