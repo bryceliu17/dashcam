@@ -26,7 +26,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         if (!isWifiConnected()) return@withContext failureOrRetry(manual, "Connect to Wi-Fi before uploading")
 
         val dao = DashcamDatabase.get(applicationContext).videoDao()
-        dao.recoverInterruptedUploads(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10))
+        if (manual) {
+            dao.recoverManualUploads()
+        } else {
+            dao.recoverInterruptedUploads(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10))
+        }
         val serverUrl = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
         val client = ServerClient(serverUrl)

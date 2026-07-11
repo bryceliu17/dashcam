@@ -28,6 +28,9 @@ interface VideoDao {
     @Query("UPDATE videos SET uploadStatus = 'Failed', errorMessage = 'Upload interrupted; queued for retry' WHERE uploadStatus = 'Uploading' AND lastUploadAttemptAt < :before")
     suspend fun recoverInterruptedUploads(before: Long)
 
+    @Query("UPDATE videos SET uploadStatus = 'Failed', errorMessage = 'Previous manual upload was interrupted; retrying' WHERE uploadStatus = 'Uploading'")
+    suspend fun recoverManualUploads()
+
     @Query("UPDATE videos SET locked = NOT locked WHERE id = :id")
     suspend fun toggleLock(id: Long)
 
