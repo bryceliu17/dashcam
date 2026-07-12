@@ -16,13 +16,19 @@ import androidx.work.workDataOf
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.network.ServerClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        uploadMutex.withLock { runUpload() }
+    }
+
+    private suspend fun runUpload(): Result {
         val manual = inputData.getBoolean(KEY_MANUAL, false)
-        if (!isWifiConnected()) return@withContext failureOrRetry(manual, "Connect to Wi-Fi before uploading")
+        if (!isWifiConnected()) return failureOrRetry(manual, "Connect to Wi-Fi before uploading")
 
         val dao = DashcamDatabase.get(applicationContext).videoDao()
         if (manual) {
@@ -33,7 +39,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val serverUrl = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
         val client = ServerClient(serverUrl)
-        if (!client.health()) return@withContext failureOrRetry(manual, "Server is unreachable: $serverUrl")
+        if (!client.health()) return failureOrRetry(manual, "Server is unreachable: $serverUrl")
 
         var failed = false
         var uploaded = 0
@@ -51,7 +57,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 dao.markFailed(video.id, lastError, System.currentTimeMillis())
             }
         }
-        when {
+        return when {
             failed && manual -> Result.failure(workDataOf(KEY_ERROR to lastError))
             failed -> Result.retry()
             candidates.isEmpty() -> Result.success(workDataOf(KEY_MESSAGE to "No pending videos to upload"))
@@ -79,6 +85,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         const val KEY_MESSAGE = "upload_message"
         const val KEY_ERROR = "upload_error"
         private const val KEY_MANUAL = "manual_upload"
+        private val uploadMutex = Mutex()
 
         private val wifiConstraint = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.UNMETERED).build()
