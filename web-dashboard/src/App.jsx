@@ -205,7 +205,7 @@ export default function App() {
     </main>
 
     {selected && <div className="modal" onMouseDown={() => setSelected(null)}><div className="player" onMouseDown={e => e.stopPropagation()}>
-      <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button title="Rotate playback 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /></button><button onClick={() => setSelected(null)}>X</button></span></div>
+      <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button className="rotate-control" title="Rotate playback clockwise by 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /><span>Rotate 90 deg</span></button><button className="close-player" aria-label="Close player" onClick={() => setSelected(null)}>X</button></span></div>
       <RotatedVideo src={`${API}/api/videos/${selected.id}/stream`} rotation={selected.playbackRotationDegrees || 0} />
       <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)} | Playback {selected.playbackRotationDegrees || 0} deg</p>
     </div></div>}
