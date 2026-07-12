@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 const API = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -38,6 +38,52 @@ function Icon({ name }) {
     rotate: <><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 1-2-5"/></>,
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
+}
+
+function RotatedVideo({ src, rotation }) {
+  const stageRef = useRef(null)
+  const videoRef = useRef(null)
+  const [layout, setLayout] = useState({ width: 0, height: 0 })
+
+  const updateLayout = useCallback(() => {
+    const stage = stageRef.current
+    const video = videoRef.current
+    if (!stage || !video || !video.videoWidth || !video.videoHeight) return
+    const quarterTurn = rotation === 90 || rotation === 270
+    const displayVideoWidth = quarterTurn ? video.videoHeight : video.videoWidth
+    const displayVideoHeight = quarterTurn ? video.videoWidth : video.videoHeight
+    const scale = Math.min(stage.clientWidth / displayVideoWidth, stage.clientHeight / displayVideoHeight)
+    const displayWidth = Math.max(1, Math.floor(displayVideoWidth * scale))
+    const displayHeight = Math.max(1, Math.floor(displayVideoHeight * scale))
+    setLayout({
+      width: quarterTurn ? displayHeight : displayWidth,
+      height: quarterTurn ? displayWidth : displayHeight,
+    })
+  }, [rotation])
+
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return undefined
+    const observer = new ResizeObserver(updateLayout)
+    observer.observe(stage)
+    updateLayout()
+    return () => observer.disconnect()
+  }, [updateLayout])
+
+  return <div className="video-stage" ref={stageRef}>
+    <video
+      ref={videoRef}
+      controls
+      autoPlay
+      src={src}
+      onLoadedMetadata={updateLayout}
+      style={{
+        width: layout.width ? `${layout.width}px` : 0,
+        height: layout.height ? `${layout.height}px` : 0,
+        transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+      }}
+    />
+  </div>
 }
 
 export default function App() {
@@ -160,7 +206,7 @@ export default function App() {
 
     {selected && <div className="modal" onMouseDown={() => setSelected(null)}><div className="player" onMouseDown={e => e.stopPropagation()}>
       <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button title="Rotate playback 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /></button><button onClick={() => setSelected(null)}>X</button></span></div>
-      <div className="video-stage"><video controls autoPlay src={`${API}/api/videos/${selected.id}/stream`} style={{ transform: `rotate(${selected.playbackRotationDegrees || 0}deg)` }} /></div>
+      <RotatedVideo src={`${API}/api/videos/${selected.id}/stream`} rotation={selected.playbackRotationDegrees || 0} />
       <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)} | Playback {selected.playbackRotationDegrees || 0} deg</p>
     </div></div>}
   </div>
