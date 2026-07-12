@@ -24,6 +24,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import android.view.Surface
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -48,6 +49,7 @@ class BackgroundRecordingService : Service() {
     private lateinit var cameraHandler: Handler
     private var wakeLock: PowerManager.WakeLock? = null
     private var activeCameraId: String? = null
+    private var legacyCameraId: Int? = null
     private var cameraDevice: CameraDevice? = null
     private var legacyCamera: Camera? = null
     private var legacySurfaceTexture: SurfaceTexture? = null
@@ -111,7 +113,8 @@ class BackgroundRecordingService : Service() {
 
     private fun openLegacyCamera() {
         try {
-            legacyCamera = Camera.open(findLegacyBackCameraId()).also {
+            legacyCameraId = findLegacyBackCameraId()
+            legacyCamera = Camera.open(legacyCameraId!!).also {
                 it.setDisplayOrientation(90)
             }
             startLegacySegment()
@@ -317,7 +320,7 @@ class BackgroundRecordingService : Service() {
                 setAudioSamplingRate(44_100)
             }
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
-            setOrientationHint(90)
+            setOrientationHint(getLegacyOrientationHintDegrees())
             setVideoEncodingBitRate(profile.videoBitRate)
             setVideoFrameRate(profile.videoFrameRate)
             setVideoSize(profile.videoFrameWidth, profile.videoFrameHeight)
@@ -331,11 +334,38 @@ class BackgroundRecordingService : Service() {
         val characteristics = manager.getCameraCharacteristics(cameraId)
         val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
+        val displayRotation = (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+        val deviceDegrees = when (displayRotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
 
         return if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-            (360 - sensorOrientation) % 360
+            (360 - (sensorOrientation + deviceDegrees) % 360) % 360
         } else {
-            sensorOrientation
+            (sensorOrientation - deviceDegrees + 360) % 360
+        }
+    }
+
+    private fun getLegacyOrientationHintDegrees(): Int {
+        val cameraId = legacyCameraId ?: return 90
+        val info = Camera.CameraInfo().also { Camera.getCameraInfo(cameraId, it) }
+        val deviceDegrees = getDeviceRotationDegrees()
+        return if (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+            (360 - (info.orientation + deviceDegrees) % 360) % 360
+        } else {
+            (info.orientation - deviceDegrees + 360) % 360
+        }
+    }
+
+    private fun getDeviceRotationDegrees(): Int {
+        return when ((getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
         }
     }
 
