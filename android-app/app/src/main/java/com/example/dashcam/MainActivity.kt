@@ -458,6 +458,10 @@ class MainActivity : ComponentActivity() {
             details.text = "${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Playback ${currentRotation}° - ${video.uploadStatus} - $lock\n${file.absolutePath}"
             lifecycleScope.launch(Dispatchers.IO) {
                 DashcamDatabase.get(this@MainActivity).videoDao().setPlaybackRotation(video.id, currentRotation)
+                val synced = syncPlaybackRotation(video, currentRotation)
+                if (!synced) withContext(Dispatchers.Main) {
+                    toast("Rotation saved on phone; server sync failed")
+                }
             }
         }
         root.addView(rotateButton, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
@@ -509,13 +513,16 @@ class MainActivity : ComponentActivity() {
             .setSingleChoiceItems(labels, rotations.indexOf(current).coerceAtLeast(0)) { dialog, which ->
                 val degrees = rotations[which]
                 getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE).edit()
-                    .putInt(KEY_DEFAULT_PLAYBACK_ROTATION, degrees)
+                    .putInt(UploadWorker.KEY_DEFAULT_PLAYBACK_ROTATION, degrees)
                     .apply()
+                val videosToSync = videos.toList()
                 lifecycleScope.launch(Dispatchers.IO) {
                     DashcamDatabase.get(this@MainActivity).videoDao().setAllPlaybackRotations(degrees)
+                    val failedSyncs = videosToSync.count { !syncPlaybackRotation(it, degrees) }
                     withContext(Dispatchers.Main) {
                         videos = videos.map { it.copy(playbackRotationDegrees = degrees) }
-                        toast("Playback rotation set to $degrees°")
+                        val suffix = if (failedSyncs > 0) "; $failedSyncs server sync(s) failed" else ""
+                        toast("Playback rotation set to $degrees°$suffix")
                         showLocalVideos()
                     }
                 }
@@ -530,7 +537,20 @@ class MainActivity : ComponentActivity() {
 
     private fun defaultPlaybackRotation(): Int =
         getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
-            .getInt(KEY_DEFAULT_PLAYBACK_ROTATION, 0)
+            .getInt(UploadWorker.KEY_DEFAULT_PLAYBACK_ROTATION, 0)
+
+    private fun syncPlaybackRotation(video: VideoEntity, degrees: Int): Boolean {
+        val serverId = video.serverVideoId ?: return true
+        return try {
+            val serverUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
+                .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
+                ?: UploadWorker.DEFAULT_SERVER_URL
+            ServerClient(serverUrl).updatePlaybackRotation(serverId, degrees)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     private fun confirmDelete(video: VideoEntity, player: VideoView) {
         AlertDialog.Builder(this)
@@ -1234,6 +1254,5 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
-        private const val KEY_DEFAULT_PLAYBACK_ROTATION = "default_playback_rotation"
     }
 }

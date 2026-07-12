@@ -35,6 +35,7 @@ function Icon({ name }) {
     download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 20h14"/></>,
     trash: <><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7"/><path d="M10 11v5m4-5v5"/></>,
     refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .7-8.7L20 11"/></>,
+    rotate: <><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 1-2-5"/></>,
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
 }
@@ -95,6 +96,18 @@ export default function App() {
     } catch (err) { setError(err.message) }
   }
 
+  const rotatePlayback = async (video) => {
+    const playbackRotationDegrees = ((video.playbackRotationDegrees || 0) + 90) % 360
+    try {
+      const updated = await api(`/api/videos/${video.id}/rotation`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playbackRotationDegrees }),
+      })
+      setVideos(items => items.map(item => item.id === updated.id ? updated : item))
+      if (selected?.id === updated.id) setSelected(updated)
+    } catch (err) { setError(err.message) }
+  }
+
   return <div className="shell">
     <header>
       <div className="brand"><span className="brand-mark">DC</span><div><strong>Dashcam Archive</strong><small>Local dashcam video library</small></div></div>
@@ -125,11 +138,12 @@ export default function App() {
           </select>
         </div></div>
 
-        <div className="table-wrap"><table><thead><tr><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
+        <div className="table-wrap"><table><thead><tr><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Rotation</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>{videos.map(video => <tr key={video.id}>
             <td>{formatDate(video.startTime)}</td>
             <td className="file"><span>{video.originalFilename || video.filename}</span><small>#{video.id}</small></td>
             <td>{formatDuration(video.durationSeconds)}</td><td>{formatBytes(video.fileSizeBytes)}</td>
+            <td>{video.playbackRotationDegrees || 0} deg</td>
             <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? 'Locked' : 'Unlocked'}</span></td>
             <td><div className="actions">
               <button title="Play" onClick={() => setSelected(video)}><Icon name="play" /></button>
@@ -145,9 +159,9 @@ export default function App() {
     </main>
 
     {selected && <div className="modal" onMouseDown={() => setSelected(null)}><div className="player" onMouseDown={e => e.stopPropagation()}>
-      <div><strong>{selected.originalFilename || selected.filename}</strong><button onClick={() => setSelected(null)}>X</button></div>
-      <video controls autoPlay src={`${API}/api/videos/${selected.id}/stream`} />
-      <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)}</p>
+      <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button title="Rotate playback 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /></button><button onClick={() => setSelected(null)}>X</button></span></div>
+      <div className="video-stage"><video controls autoPlay src={`${API}/api/videos/${selected.id}/stream`} style={{ transform: `rotate(${selected.playbackRotationDegrees || 0}deg)` }} /></div>
+      <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)} | Playback {selected.playbackRotationDegrees || 0} deg</p>
     </div></div>}
   </div>
 }
