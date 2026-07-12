@@ -88,6 +88,7 @@ class MainActivity : ComponentActivity() {
     private var showingVideoManager = false
     private var showingVideoList = false
     private var returnToVideoListAfterManager = false
+    private var exitVideoFullscreen: (() -> Boolean)? = null
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var cameraProvider: ProcessCameraProvider? = null
@@ -185,6 +186,7 @@ class MainActivity : ComponentActivity() {
         checkServer()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (exitVideoFullscreen?.invoke() == true) return
                 if (showingVideoManager) {
                     showingVideoManager = false
                     if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
@@ -422,12 +424,13 @@ class MainActivity : ComponentActivity() {
             setBackgroundColor(Color.rgb(244, 244, 240))
         }
 
-        root.addView(TextView(this).apply {
+        val title = TextView(this).apply {
             text = video.filename
             textSize = 18f
             setTextColor(Color.rgb(17, 24, 39))
             setPadding(0, 0, 0, dp(10))
-        })
+        }
+        root.addView(title)
 
         var currentRotation = effectivePlaybackRotation(video)
         val player = RotatableVideoPlayer(this).apply {
@@ -484,6 +487,24 @@ class MainActivity : ComponentActivity() {
             confirmDelete(video, player)
         }, weighted().apply { marginStart = dp(8) })
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)))
+        player.setOnFullscreenToggleListener { fullscreen ->
+            title.visibility = if (fullscreen) View.GONE else View.VISIBLE
+            details.visibility = if (fullscreen) View.GONE else View.VISIBLE
+            rotateButton.visibility = if (fullscreen) View.GONE else View.VISIBLE
+            controls.visibility = if (fullscreen) View.GONE else View.VISIBLE
+            root.setPadding(if (fullscreen) 0 else dp(16), if (fullscreen) 0 else dp(16), if (fullscreen) 0 else dp(16), if (fullscreen) 0 else dp(16))
+            window.decorView.systemUiVisibility = if (fullscreen) {
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            } else {
+                View.SYSTEM_UI_FLAG_VISIBLE
+            }
+            exitVideoFullscreen = if (fullscreen) ({ player.exitFullscreen() }) else null
+        }
         setContentView(root)
     }
 
