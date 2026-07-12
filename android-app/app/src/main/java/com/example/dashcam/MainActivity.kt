@@ -7,8 +7,10 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.media.MediaMetadataRetriever
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -187,6 +189,7 @@ class MainActivity : ComponentActivity() {
             override fun handleOnBackPressed() {
                 if (showingVideoManager) {
                     showingVideoManager = false
+                    restorePlaybackOrientation()
                     if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
                 } else if (showingVideoList) {
                     showingVideoList = false
@@ -411,6 +414,7 @@ class MainActivity : ComponentActivity() {
         }
 
         showingVideoManager = true
+        applyPlaybackOrientation(file)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -450,6 +454,7 @@ class MainActivity : ComponentActivity() {
         controls.addView(actionButton("Back") {
             player.stopPlayback()
             showingVideoManager = false
+            restorePlaybackOrientation()
             if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
         }, weighted())
         controls.addView(actionButton(if (video.locked) "Unlock" else "Lock") {
@@ -458,6 +463,7 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) {
                     player.stopPlayback()
                     showingVideoManager = false
+                    restorePlaybackOrientation()
                     if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
                 }
             }
@@ -467,6 +473,29 @@ class MainActivity : ComponentActivity() {
         }, weighted().apply { marginStart = dp(8) })
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)))
         setContentView(root)
+    }
+
+    private fun applyPlaybackOrientation(file: File) {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(file.absolutePath)
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: return
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: return
+            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            val landscape = if (rotation == 90 || rotation == 270) height > width else width > height
+            requestedOrientation = if (landscape) {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            }
+        } catch (_: Exception) {
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun restorePlaybackOrientation() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 
     private fun confirmDelete(video: VideoEntity, player: VideoView) {
@@ -485,6 +514,7 @@ class MainActivity : ComponentActivity() {
                         } else {
                             player.stopPlayback()
                             showingVideoManager = false
+                            restorePlaybackOrientation()
                             if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
                         }
                     }
@@ -837,6 +867,8 @@ class MainActivity : ComponentActivity() {
                         )
                     ).build()
                     val capture = VideoCapture.withOutput(recorder)
+                    capture.targetRotation = previewView.display?.rotation
+                        ?: windowManager.defaultDisplay.rotation
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
