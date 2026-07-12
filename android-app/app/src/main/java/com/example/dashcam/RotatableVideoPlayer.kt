@@ -20,6 +20,8 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     private var rotationDegrees = 0
     private var startWhenPrepared = false
     private var isPrepared = false
+    private var videoWidth = 0
+    private var videoHeight = 0
 
     init {
         addView(textureView)
@@ -75,20 +77,24 @@ class RotatableVideoPlayer @JvmOverloads constructor(
             surface.release()
             setOnPreparedListener {
                 isPrepared = true
+                this@RotatableVideoPlayer.videoWidth = it.videoWidth
+                this@RotatableVideoPlayer.videoHeight = it.videoHeight
                 controller.isEnabled = true
                 requestLayout()
                 if (startWhenPrepared) start()
             }
-            setOnVideoSizeChangedListener { _, _, _ -> requestLayout() }
+            setOnVideoSizeChangedListener { _, width, height ->
+                this@RotatableVideoPlayer.videoWidth = width
+                this@RotatableVideoPlayer.videoHeight = height
+                requestLayout()
+            }
             prepareAsync()
         }
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
-        val quarterTurn = rotationDegrees == 90 || rotationDegrees == 270
-        val childWidth = if (quarterTurn) measuredHeight else measuredWidth
-        val childHeight = if (quarterTurn) measuredWidth else measuredHeight
+        val (childWidth, childHeight) = fittedTextureSize(measuredWidth, measuredHeight)
         textureView.measure(
             MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(childHeight, MeasureSpec.EXACTLY)
@@ -98,14 +104,28 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         val width = right - left
         val height = bottom - top
-        val quarterTurn = rotationDegrees == 90 || rotationDegrees == 270
-        val childWidth = if (quarterTurn) height else width
-        val childHeight = if (quarterTurn) width else height
+        val (childWidth, childHeight) = fittedTextureSize(width, height)
         val childLeft = (width - childWidth) / 2
         val childTop = (height - childHeight) / 2
         textureView.layout(childLeft, childTop, childLeft + childWidth, childTop + childHeight)
         textureView.pivotX = childWidth / 2f
         textureView.pivotY = childHeight / 2f
+    }
+
+    private fun fittedTextureSize(containerWidth: Int, containerHeight: Int): Pair<Int, Int> {
+        if (containerWidth <= 0 || containerHeight <= 0 || videoWidth <= 0 || videoHeight <= 0) {
+            return containerWidth.coerceAtLeast(1) to containerHeight.coerceAtLeast(1)
+        }
+        val quarterTurn = rotationDegrees == 90 || rotationDegrees == 270
+        val displayVideoWidth = if (quarterTurn) videoHeight else videoWidth
+        val displayVideoHeight = if (quarterTurn) videoWidth else videoHeight
+        val scale = minOf(
+            containerWidth.toFloat() / displayVideoWidth,
+            containerHeight.toFloat() / displayVideoHeight
+        )
+        val displayWidth = (displayVideoWidth * scale).toInt().coerceAtLeast(1)
+        val displayHeight = (displayVideoHeight * scale).toInt().coerceAtLeast(1)
+        return if (quarterTurn) displayHeight to displayWidth else displayWidth to displayHeight
     }
 
     override fun start() {
