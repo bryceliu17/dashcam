@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.media.MediaMetadataRetriever
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<String>
     private var videos: List<VideoEntity> = emptyList()
+    private val recordedOrientationCache = mutableMapOf<String, String>()
     private var showingVideoManager = false
     private var showingVideoList = false
     private var returnToVideoListAfterManager = false
@@ -1179,8 +1181,30 @@ class MainActivity : ComponentActivity() {
         val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM, Locale.getDefault()).format(Date(video.startTime))
         val lock = if (video.locked) "LOCKED" else "NORMAL"
         val error = video.errorMessage?.let { "\n$it" }.orEmpty()
-        return "$date  ${video.filename}\n${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Playback ${effectivePlaybackRotation(video)}° - ${video.uploadStatus} - $lock$error"
+        return "$date  ${video.filename}\n${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Recorded ${recordedOrientation(video)} - Playback ${effectivePlaybackRotation(video)}° - ${video.uploadStatus} - $lock$error"
     }
+
+    private fun recordedOrientation(video: VideoEntity): String =
+        recordedOrientationCache.getOrPut(video.localPath) {
+            val file = File(video.localPath)
+            if (!file.exists()) return@getOrPut "Unknown"
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(file.absolutePath)
+                val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                    ?: return@getOrPut "Unknown"
+                val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+                    ?: return@getOrPut "Unknown"
+                val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                val displayWidth = if (rotation == 90 || rotation == 270) height else width
+                val displayHeight = if (rotation == 90 || rotation == 270) width else height
+                if (displayWidth >= displayHeight) "Landscape" else "Portrait"
+            } catch (_: Exception) {
+                "Unknown"
+            } finally {
+                retriever.release()
+            }
+        }
     private fun recordingSource(video: VideoEntity): String =
         if (video.filename.startsWith("dashcam_bg_")) "Background" else "Foreground"
     private fun formatBytes(bytes: Long): String = when {
