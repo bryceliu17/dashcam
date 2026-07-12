@@ -9,8 +9,8 @@ import android.util.AttributeSet
 import android.view.Gravity
 import android.view.Surface
 import android.view.TextureView
-import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -20,18 +20,35 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : FrameLayout(context, attrs), TextureView.SurfaceTextureListener {
     private val textureView = TextureView(context)
-    private val playPauseButton = Button(context).apply { text = "Pause"; isAllCaps = false }
+    private val playPauseButton = ImageButton(context).apply {
+        setImageResource(android.R.drawable.ic_media_pause)
+        contentDescription = "Pause"
+        setColorFilter(0xffffffff.toInt())
+        setBackgroundColor(0x00000000)
+    }
     private val timeView = TextView(context).apply {
         text = "00:00 / 00:00"
         gravity = Gravity.CENTER
         setTextColor(0xfff3f4f6.toInt())
     }
     private val seekBar = SeekBar(context)
-    private val fullscreenButton = Button(context).apply { text = "Fullscreen"; isAllCaps = false }
-    private val controlBar = LinearLayout(context).apply {
+    private val rotateButton = ImageButton(context).apply {
+        setImageResource(R.drawable.ic_rotate_clockwise)
+        contentDescription = "Rotate playback 90 degrees clockwise"
+        setBackgroundColor(0x00000000)
+    }
+    private val fullscreenButton = ImageButton(context).apply {
+        setImageResource(R.drawable.ic_fullscreen)
+        contentDescription = "Enter fullscreen"
+        setBackgroundColor(0x00000000)
+    }
+    private val buttonRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(4), 0, dp(4), 0)
+    }
+    private val controlsOverlay = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
         setBackgroundColor(0xcc111827.toInt())
     }
     private val handler = Handler(Looper.getMainLooper())
@@ -44,6 +61,7 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     private var videoHeight = 0
     private var isFullscreen = false
     private var fullscreenListener: ((Boolean) -> Unit)? = null
+    private var rotateListener: (() -> Unit)? = null
     private var userSeeking = false
     private val progressUpdater = object : Runnable {
         override fun run() {
@@ -55,13 +73,19 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     init {
         addView(textureView)
         textureView.surfaceTextureListener = this
-        controlBar.addView(playPauseButton, LinearLayout.LayoutParams(dp(76), dp(44)))
-        controlBar.addView(timeView, LinearLayout.LayoutParams(dp(105), dp(44)))
-        controlBar.addView(seekBar, LinearLayout.LayoutParams(0, dp(44), 1f))
-        controlBar.addView(fullscreenButton, LinearLayout.LayoutParams(dp(108), dp(44)))
-        addView(controlBar, LayoutParams(LayoutParams.MATCH_PARENT, dp(48), Gravity.BOTTOM))
+        controlsOverlay.addView(seekBar, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(40)))
+        buttonRow.addView(playPauseButton, LinearLayout.LayoutParams(dp(48), dp(44)))
+        buttonRow.addView(timeView, LinearLayout.LayoutParams(dp(118), dp(44)))
+        buttonRow.addView(TextView(context), LinearLayout.LayoutParams(0, dp(44), 1f))
+        buttonRow.addView(rotateButton, LinearLayout.LayoutParams(dp(48), dp(44)))
+        buttonRow.addView(fullscreenButton, LinearLayout.LayoutParams(dp(48), dp(44)))
+        controlsOverlay.addView(buttonRow, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(44)))
+        addView(controlsOverlay, LayoutParams(LayoutParams.MATCH_PARENT, dp(84), Gravity.BOTTOM))
+        controlsOverlay.setOnClickListener { }
         playPauseButton.setOnClickListener { if (isPlaying()) pause() else start() }
+        rotateButton.setOnClickListener { rotateListener?.invoke() }
         fullscreenButton.setOnClickListener { setFullscreenState(!isFullscreen, notify = true) }
+        setOnClickListener { controlsOverlay.visibility = if (controlsOverlay.visibility == VISIBLE) GONE else VISIBLE }
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onStartTrackingTouch(seekBar: SeekBar) { userSeeking = true }
             override fun onStopTrackingTouch(seekBar: SeekBar) {
@@ -73,6 +97,7 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     }
 
     fun setOnFullscreenToggleListener(listener: (Boolean) -> Unit) { fullscreenListener = listener }
+    fun setOnRotateClickListener(listener: () -> Unit) { rotateListener = listener }
 
     fun exitFullscreen(): Boolean {
         if (!isFullscreen) return false
@@ -199,7 +224,9 @@ class RotatableVideoPlayer @JvmOverloads constructor(
     private fun updateControls() {
         val duration = getDuration().coerceAtLeast(0)
         val position = getCurrentPosition().coerceIn(0, duration.coerceAtLeast(0))
-        playPauseButton.text = if (isPlaying()) "Pause" else "Play"
+        val playing = isPlaying()
+        playPauseButton.setImageResource(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
+        playPauseButton.contentDescription = if (playing) "Pause" else "Play"
         if (!userSeeking) {
             seekBar.max = duration.coerceAtLeast(1)
             seekBar.progress = position
@@ -209,7 +236,9 @@ class RotatableVideoPlayer @JvmOverloads constructor(
 
     private fun setFullscreenState(fullscreen: Boolean, notify: Boolean) {
         isFullscreen = fullscreen
-        fullscreenButton.text = if (fullscreen) "Exit" else "Fullscreen"
+        fullscreenButton.setImageResource(if (fullscreen) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
+        fullscreenButton.contentDescription = if (fullscreen) "Exit fullscreen" else "Enter fullscreen"
+        controlsOverlay.visibility = VISIBLE
         if (notify) fullscreenListener?.invoke(fullscreen)
     }
 
