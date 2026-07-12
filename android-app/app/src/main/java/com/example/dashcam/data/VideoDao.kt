@@ -34,6 +34,12 @@ interface VideoDao {
     @Query("UPDATE videos SET locked = NOT locked WHERE id = :id")
     suspend fun toggleLock(id: Long)
 
+    @Query("UPDATE videos SET playbackRotationDegrees = :degrees WHERE id = :id")
+    suspend fun setPlaybackRotation(id: Long, degrees: Int)
+
+    @Query("UPDATE videos SET playbackRotationDegrees = :degrees")
+    suspend fun setAllPlaybackRotations(degrees: Int)
+
     @Query("SELECT COALESCE(SUM(fileSizeBytes), 0) FROM videos")
     suspend fun totalSize(): Long
 

@@ -22,4 +22,5 @@ data class VideoEntity(
     val retryCount: Int = 0,
     val lastUploadAttemptAt: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    val playbackRotationDegrees: Int? = null,
 )
