@@ -24,7 +24,7 @@ class ServerClient(private val baseUrl: String) {
         client.newCall(request).execute().use { it.isSuccessful }
     } catch (_: Exception) { false }
 
-    fun upload(video: VideoEntity): Long {
+    fun upload(video: VideoEntity, playbackRotationDegrees: Int): Long {
         val file = File(video.localPath)
         require(file.exists()) { "Local file is missing: ${video.filename}" }
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -34,12 +34,27 @@ class ServerClient(private val baseUrl: String) {
             .addFormDataPart("endTime", Instant.ofEpochMilli(video.endTime).toString())
             .addFormDataPart("durationSeconds", video.durationSeconds.toString())
             .addFormDataPart("fileSizeBytes", file.length().toString())
+            .addFormDataPart("playbackRotationDegrees", playbackRotationDegrees.toString())
             .build()
         val request = Request.Builder().url("${cleanBase()}/api/videos/upload").post(body).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
             return JSONObject(text).getLong("id")
+        }
+    }
+
+    fun updatePlaybackRotation(serverVideoId: Long, playbackRotationDegrees: Int) {
+        val json = JSONObject()
+            .put("playbackRotationDegrees", playbackRotationDegrees)
+            .toString()
+            .toRequestBody("application/json".toMediaType())
+        val request = Request.Builder().url("${cleanBase()}/api/videos/$serverVideoId/rotation")
+            .header("Connection", "close")
+            .patch(json).build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
         }
     }
 

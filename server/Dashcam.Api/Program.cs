@@ -22,6 +22,7 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<DashcamDbContext>();
     await db.Database.EnsureCreatedAsync();
+    await EnsurePlaybackRotationColumnAsync(db);
 }
 
 app.MapGet("/api/health", () => Results.Ok(new
@@ -56,6 +57,12 @@ app.MapPost("/api/videos/upload", async (
     if (durationSeconds < 0 || endTime < startTime)
         return Results.BadRequest(new { error = "The video time range is invalid." });
 
+    var playbackRotationDegrees = int.TryParse(form["playbackRotationDegrees"].FirstOrDefault(), out var parsedRotation)
+        ? parsedRotation
+        : 0;
+    if (!IsValidRotation(playbackRotationDegrees))
+        return Results.BadRequest(new { error = "playbackRotationDegrees must be 0, 90, 180 or 270." });
+
     var configuredSize = long.TryParse(form["fileSizeBytes"].FirstOrDefault(), out var parsedSize)
         ? parsedSize
         : file.Length;
@@ -88,6 +95,7 @@ app.MapPost("/api/videos/upload", async (
             DurationSeconds = durationSeconds,
             FileSizeBytes = file.Length,
             Locked = false,
+            PlaybackRotationDegrees = playbackRotationDegrees,
             UploadedAt = now,
             CreatedAt = now
         };
@@ -162,6 +170,18 @@ app.MapPatch("/api/videos/{id:int}/lock", async (
     var video = await db.Videos.SingleOrDefaultAsync(x => x.Id == id, token);
     if (video is null) return Results.NotFound();
     video.Locked = request.Locked;
+    await db.SaveChangesAsync(token);
+    return Results.Ok(ToResponse(video));
+});
+
+app.MapPatch("/api/videos/{id:int}/rotation", async (
+    int id, RotationRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    if (!IsValidRotation(request.PlaybackRotationDegrees))
+        return Results.BadRequest(new { error = "playbackRotationDegrees must be 0, 90, 180 or 270." });
+    var video = await db.Videos.SingleOrDefaultAsync(x => x.Id == id, token);
+    if (video is null) return Results.NotFound();
+    video.PlaybackRotationDegrees = request.PlaybackRotationDegrees;
     await db.SaveChangesAsync(token);
     return Results.Ok(ToResponse(video));
 });
@@ -248,6 +268,30 @@ static bool TryDelete(string path)
     catch (UnauthorizedAccessException) { return false; }
 }
 
+static bool IsValidRotation(int degrees) => degrees is 0 or 90 or 180 or 270;
+
+static async Task EnsurePlaybackRotationColumnAsync(DashcamDbContext db)
+{
+    var connection = db.Database.GetDbConnection();
+    await connection.OpenAsync();
+    await using var check = connection.CreateCommand();
+    check.CommandText = "PRAGMA table_info('Videos')";
+    var exists = false;
+    await using (var reader = await check.ExecuteReaderAsync())
+    {
+        while (await reader.ReadAsync())
+        {
+            if (string.Equals(reader.GetString(1), "PlaybackRotationDegrees", StringComparison.OrdinalIgnoreCase))
+            {
+                exists = true;
+                break;
+            }
+        }
+    }
+    if (!exists)
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE Videos ADD COLUMN PlaybackRotationDegrees INTEGER NOT NULL DEFAULT 0");
+}
+
 static string CleanFileBase(string value)
 {
     var invalid = Path.GetInvalidFileNameChars().ToHashSet();
@@ -266,8 +310,10 @@ static object ToResponse(Video video) => new
     video.DurationSeconds,
     video.FileSizeBytes,
     video.Locked,
+    video.PlaybackRotationDegrees,
     video.UploadedAt,
     streamUrl = $"/api/videos/{video.Id}/stream"
 };
 
 public sealed record LockRequest(bool Locked);
+public sealed record RotationRequest(int PlaybackRotationDegrees);

@@ -38,6 +38,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
         val serverUrl = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
+        val defaultPlaybackRotation = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_DEFAULT_PLAYBACK_ROTATION, 0)
         val client = ServerClient(serverUrl)
         if (!client.health()) return failureOrRetry(manual, "Server is unreachable: $serverUrl")
 
@@ -48,7 +50,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         for (video in candidates) {
             if (dao.markUploading(video.id, System.currentTimeMillis()) == 0) continue
             try {
-                val serverId = client.upload(video)
+                val serverId = client.upload(video, video.playbackRotationDegrees ?: defaultPlaybackRotation)
                 dao.markUploaded(video.id, serverId, System.currentTimeMillis())
                 uploaded += 1
             } catch (error: Exception) {
@@ -79,6 +81,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     companion object {
         const val PREFS = "dashcam_settings"
         const val KEY_SERVER_URL = "server_url"
+        const val KEY_DEFAULT_PLAYBACK_ROTATION = "default_playback_rotation"
         const val DEFAULT_SERVER_URL = "http://192.168.1.50:5000"
         private const val UNIQUE_NOW = "dashcam-upload-now"
         private const val UNIQUE_PERIODIC = "dashcam-upload-periodic"
