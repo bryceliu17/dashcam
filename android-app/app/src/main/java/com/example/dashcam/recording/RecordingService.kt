@@ -14,7 +14,6 @@ import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
 import android.view.Surface
-import android.view.WindowManager
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
@@ -218,8 +217,6 @@ class RecordingService : LifecycleService() {
                         )
                     ).build()
                     val capture = VideoCapture.withOutput(recorder)
-                    capture.targetRotation = (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
-                        .defaultDisplay.rotation
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider { request -> provideDummyPreviewSurface(request) }
                     }

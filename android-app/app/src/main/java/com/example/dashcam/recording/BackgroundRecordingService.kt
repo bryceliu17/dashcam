@@ -21,8 +21,6 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import android.view.Surface
-import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -222,18 +220,11 @@ class BackgroundRecordingService : Service() {
         val characteristics = manager.getCameraCharacteristics(cameraId)
         val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         val lensFacing = characteristics.get(CameraCharacteristics.LENS_FACING)
-        val displayRotation = (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
-        val deviceDegrees = when (displayRotation) {
-            Surface.ROTATION_90 -> 90
-            Surface.ROTATION_180 -> 180
-            Surface.ROTATION_270 -> 270
-            else -> 0
-        }
 
         return if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
-            (360 - (sensorOrientation + deviceDegrees) % 360) % 360
+            (360 - sensorOrientation) % 360
         } else {
-            (sensorOrientation - deviceDegrees + 360) % 360
+            sensorOrientation
         }
     }
 
