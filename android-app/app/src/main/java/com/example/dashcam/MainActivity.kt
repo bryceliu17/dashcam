@@ -23,15 +23,12 @@ import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
-import android.widget.MediaController
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -433,19 +430,12 @@ class MainActivity : ComponentActivity() {
         })
 
         var currentRotation = effectivePlaybackRotation(video)
-        val playerContainer = FrameLayout(this)
-        val player = VideoView(this).apply {
+        val player = RotatableVideoPlayer(this).apply {
             setVideoPath(file.absolutePath)
-            setMediaController(MediaController(this@MainActivity).also { it.setAnchorView(this) })
-            setOnPreparedListener { it.isLooping = false; start() }
-            setOnErrorListener { _, _, _ ->
-                toast("Unable to play this video")
-                true
-            }
+            setRotationDegrees(currentRotation)
+            start()
         }
-        playerContainer.addView(player)
-        root.addView(playerContainer, LinearLayout.LayoutParams(-1, 0, 1f))
-        applyPlayerRotation(player, playerContainer, currentRotation)
+        root.addView(player, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val details = TextView(this).apply {
             val lock = if (video.locked) "LOCKED" else "NORMAL"
@@ -458,7 +448,7 @@ class MainActivity : ComponentActivity() {
 
         val rotateButton = actionButton("Rotate Playback 90°") {
             currentRotation = (currentRotation + 90) % 360
-            applyPlayerRotation(player, playerContainer, currentRotation)
+            player.setRotationDegrees(currentRotation)
             val lock = if (video.locked) "LOCKED" else "NORMAL"
             details.text = "${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Playback ${currentRotation}° - ${video.uploadStatus} - $lock\n${file.absolutePath}"
             lifecycleScope.launch(Dispatchers.IO) {
@@ -495,18 +485,6 @@ class MainActivity : ComponentActivity() {
         }, weighted().apply { marginStart = dp(8) })
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)))
         setContentView(root)
-    }
-
-    private fun applyPlayerRotation(player: VideoView, container: FrameLayout, degrees: Int) {
-        container.post {
-            val quarterTurn = degrees == 90 || degrees == 270
-            player.layoutParams = FrameLayout.LayoutParams(
-                if (quarterTurn) container.height else FrameLayout.LayoutParams.MATCH_PARENT,
-                if (quarterTurn) container.width else FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
-            )
-            player.rotation = degrees.toFloat()
-        }
     }
 
     private fun showSetAllPlaybackRotationDialog() {
@@ -557,7 +535,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun confirmDelete(video: VideoEntity, player: VideoView) {
+    private fun confirmDelete(video: VideoEntity, player: RotatableVideoPlayer) {
         AlertDialog.Builder(this)
             .setTitle("Delete video?")
             .setMessage(video.filename)
