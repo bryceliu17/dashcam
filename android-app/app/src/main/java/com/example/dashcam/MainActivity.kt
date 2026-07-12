@@ -47,8 +47,6 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.network.ServerClient
@@ -1048,14 +1046,12 @@ class MainActivity : ComponentActivity() {
 
     private fun startManualUpload() {
         saveServerUrl()
-        val workId = UploadWorker.enqueueManual(this)
-        toast("Upload started (Wi-Fi only)")
-        WorkManager.getInstance(this).getWorkInfoByIdLiveData(workId).observe(this) { info ->
-            when (info?.state) {
-                WorkInfo.State.SUCCEEDED -> toast(info.outputData.getString(UploadWorker.KEY_MESSAGE) ?: "Upload complete")
-                WorkInfo.State.FAILED -> toast(info.outputData.getString(UploadWorker.KEY_ERROR) ?: "Upload failed")
-                WorkInfo.State.CANCELLED -> toast("Upload cancelled")
-                else -> Unit
+        toast("Uploading...")
+        lifecycleScope.launch {
+            try {
+                toast(UploadWorker.uploadManually(this@MainActivity))
+            } catch (error: Exception) {
+                toast(error.message ?: "Upload failed")
             }
         }
     }
