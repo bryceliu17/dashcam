@@ -22,6 +22,7 @@ import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.MediaController
@@ -386,6 +387,11 @@ class MainActivity : ComponentActivity() {
         }
         adapter.addAll(videos.map(::formatVideo))
         root.addView(videoList, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(actionButton("Set All Playback Rotation") {
+            showSetAllPlaybackRotationDialog()
+        }.apply {
+            isEnabled = videos.isNotEmpty()
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -399,7 +405,7 @@ class MainActivity : ComponentActivity() {
         }.apply {
             isEnabled = videos.isNotEmpty()
         }, weighted().apply { marginStart = dp(8) })
-        root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(10) })
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         setContentView(root)
     }
 
@@ -424,6 +430,8 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(10))
         })
 
+        var currentRotation = effectivePlaybackRotation(video)
+        val playerContainer = FrameLayout(this)
         val player = VideoView(this).apply {
             setVideoPath(file.absolutePath)
             setMediaController(MediaController(this@MainActivity).also { it.setAnchorView(this) })
@@ -433,15 +441,29 @@ class MainActivity : ComponentActivity() {
                 true
             }
         }
-        root.addView(player, LinearLayout.LayoutParams(-1, 0, 1f))
+        playerContainer.addView(player)
+        root.addView(playerContainer, LinearLayout.LayoutParams(-1, 0, 1f))
+        applyPlayerRotation(player, playerContainer, currentRotation)
 
-        root.addView(TextView(this).apply {
+        val details = TextView(this).apply {
             val lock = if (video.locked) "LOCKED" else "NORMAL"
-            text = "${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - ${video.uploadStatus} - $lock\n${file.absolutePath}"
+            text = "${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Playback ${currentRotation}° - ${video.uploadStatus} - $lock\n${file.absolutePath}"
             textSize = 12f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, dp(10), 0, dp(10))
-        })
+        }
+        root.addView(details)
+
+        val rotateButton = actionButton("Rotate Playback 90°") {
+            currentRotation = (currentRotation + 90) % 360
+            applyPlayerRotation(player, playerContainer, currentRotation)
+            val lock = if (video.locked) "LOCKED" else "NORMAL"
+            details.text = "${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Playback ${currentRotation}° - ${video.uploadStatus} - $lock\n${file.absolutePath}"
+            lifecycleScope.launch(Dispatchers.IO) {
+                DashcamDatabase.get(this@MainActivity).videoDao().setPlaybackRotation(video.id, currentRotation)
+            }
+        }
+        root.addView(rotateButton, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
 
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -468,6 +490,50 @@ class MainActivity : ComponentActivity() {
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)))
         setContentView(root)
     }
+
+    private fun applyPlayerRotation(player: VideoView, container: FrameLayout, degrees: Int) {
+        container.post {
+            val quarterTurn = degrees == 90 || degrees == 270
+            player.layoutParams = FrameLayout.LayoutParams(
+                if (quarterTurn) container.height else FrameLayout.LayoutParams.MATCH_PARENT,
+                if (quarterTurn) container.width else FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+            player.rotation = degrees.toFloat()
+        }
+    }
+
+    private fun showSetAllPlaybackRotationDialog() {
+        val rotations = intArrayOf(0, 90, 180, 270)
+        val labels = rotations.map { "$it°" }.toTypedArray()
+        val current = defaultPlaybackRotation()
+        AlertDialog.Builder(this)
+            .setTitle("Set playback rotation for all videos")
+            .setSingleChoiceItems(labels, rotations.indexOf(current).coerceAtLeast(0)) { dialog, which ->
+                val degrees = rotations[which]
+                getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE).edit()
+                    .putInt(KEY_DEFAULT_PLAYBACK_ROTATION, degrees)
+                    .apply()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    DashcamDatabase.get(this@MainActivity).videoDao().setAllPlaybackRotations(degrees)
+                    withContext(Dispatchers.Main) {
+                        videos = videos.map { it.copy(playbackRotationDegrees = degrees) }
+                        toast("Playback rotation set to $degrees°")
+                        showLocalVideos()
+                    }
+                }
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun effectivePlaybackRotation(video: VideoEntity): Int =
+        video.playbackRotationDegrees ?: defaultPlaybackRotation()
+
+    private fun defaultPlaybackRotation(): Int =
+        getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
+            .getInt(KEY_DEFAULT_PLAYBACK_ROTATION, 0)
 
     private fun confirmDelete(video: VideoEntity, player: VideoView) {
         AlertDialog.Builder(this)
@@ -1099,7 +1165,7 @@ class MainActivity : ComponentActivity() {
         val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM, Locale.getDefault()).format(Date(video.startTime))
         val lock = if (video.locked) "LOCKED" else "NORMAL"
         val error = video.errorMessage?.let { "\n$it" }.orEmpty()
-        return "$date  ${video.filename}\n${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - ${video.uploadStatus} - $lock$error"
+        return "$date  ${video.filename}\n${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Playback ${effectivePlaybackRotation(video)}° - ${video.uploadStatus} - $lock$error"
     }
     private fun recordingSource(video: VideoEntity): String =
         if (video.filename.startsWith("dashcam_bg_")) "Background" else "Foreground"
@@ -1130,5 +1196,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
+        private const val KEY_DEFAULT_PLAYBACK_ROTATION = "default_playback_rotation"
     }
 }
