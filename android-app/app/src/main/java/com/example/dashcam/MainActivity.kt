@@ -444,7 +444,7 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(details)
 
-        val rotateButton = actionButton("Rotate Playback 90°") {
+        player.setOnRotateClickListener {
             currentRotation = (currentRotation + 90) % 360
             player.setRotationDegrees(currentRotation)
             val lock = if (video.locked) "LOCKED" else "NORMAL"
@@ -457,7 +457,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        root.addView(rotateButton, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
 
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -485,7 +484,6 @@ class MainActivity : ComponentActivity() {
         player.setOnFullscreenToggleListener { fullscreen ->
             title.visibility = if (fullscreen) View.GONE else View.VISIBLE
             details.visibility = if (fullscreen) View.GONE else View.VISIBLE
-            rotateButton.visibility = if (fullscreen) View.GONE else View.VISIBLE
             controls.visibility = if (fullscreen) View.GONE else View.VISIBLE
             root.setPadding(if (fullscreen) 0 else dp(16), if (fullscreen) 0 else dp(16), if (fullscreen) 0 else dp(16), if (fullscreen) 0 else dp(16))
             window.decorView.systemUiVisibility = if (fullscreen) {
