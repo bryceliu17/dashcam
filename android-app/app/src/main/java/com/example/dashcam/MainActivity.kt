@@ -19,6 +19,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -476,12 +477,24 @@ class MainActivity : ComponentActivity() {
             setBackgroundColor(Color.rgb(244, 244, 240))
         }
 
-        root.addView(TextView(this).apply {
+        val videoTitleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        videoTitleRow.addView(TextView(this).apply {
             text = "Local Videos"
             textSize = 24f
             setTextColor(Color.rgb(17, 24, 39))
-            setPadding(0, 0, 0, dp(8))
-        })
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -1, 1f))
+        videoTitleRow.addView(TextView(this).apply {
+            text = "Max per video: 3 min"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setSingleLine(true)
+        }, LinearLayout.LayoutParams(-2, -1).apply { marginStart = dp(8) })
+        root.addView(videoTitleRow, LinearLayout.LayoutParams(-1, dp(42)).apply { bottomMargin = dp(3) })
         root.addView(TextView(this).apply {
             text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.MAX_VIDEO_BYTES)}"
             textSize = 14f
@@ -541,12 +554,24 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
             setBackgroundColor(Color.rgb(244, 244, 240))
         }
-        root.addView(TextView(this).apply {
+        val audioTitleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        audioTitleRow.addView(TextView(this).apply {
             text = "Local Audio"
             textSize = 24f
             setTextColor(Color.rgb(17, 24, 39))
-            setPadding(0, 0, 0, dp(8))
-        })
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, -1, 1f))
+        audioTitleRow.addView(TextView(this).apply {
+            text = "Max per audio: 30 min"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setSingleLine(true)
+        }, LinearLayout.LayoutParams(-2, -1).apply { marginStart = dp(8) })
+        root.addView(audioTitleRow, LinearLayout.LayoutParams(-1, dp(42)).apply { bottomMargin = dp(3) })
         root.addView(TextView(this).apply {
             text = "${audioFiles.size} recordings - ${formatBytes(audioFiles.sumOf { it.file.length() })} / ${formatBytes(AudioStoragePolicy.MAX_AUDIO_BYTES)}"
             textSize = 14f
