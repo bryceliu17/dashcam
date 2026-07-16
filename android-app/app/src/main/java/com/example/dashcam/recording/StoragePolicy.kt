@@ -14,23 +14,21 @@ object StoragePolicy {
 
     suspend fun prepareForRecordingWithResult(context: Context, videoDirectory: File): StoragePreparation {
         val dao = DashcamDatabase.get(context).videoDao()
-        var totalVideoBytes = dao.totalSize()
+        val totalVideoBytes = dao.totalSize()
         var deletedCount = 0
-        if (totalVideoBytes >= MAX_VIDEO_BYTES || videoDirectory.usableSpace < MIN_FREE_BYTES) {
-            for (candidate in dao.cleanupCandidatesForLocalStorage()) {
-                if (totalVideoBytes < MAX_VIDEO_BYTES && videoDirectory.usableSpace >= MIN_FREE_BYTES) break
-
+        val cleanupRequired = totalVideoBytes >= MAX_VIDEO_BYTES || videoDirectory.usableSpace < MIN_FREE_BYTES
+        if (cleanupRequired) {
+            dao.cleanupCandidatesForLocalStorage().firstOrNull()?.let { candidate ->
                 val file = File(candidate.localPath)
                 if (!file.exists() || file.delete()) {
                     dao.delete(candidate)
-                    totalVideoBytes = (totalVideoBytes - candidate.fileSizeBytes).coerceAtLeast(0)
-                    deletedCount += 1
+                    deletedCount = 1
                 }
             }
         }
 
         return StoragePreparation(
-            canRecord = totalVideoBytes < MAX_VIDEO_BYTES && videoDirectory.usableSpace >= MIN_FREE_BYTES,
+            canRecord = !cleanupRequired || deletedCount == 1,
             deletedCount = deletedCount
         )
     }
