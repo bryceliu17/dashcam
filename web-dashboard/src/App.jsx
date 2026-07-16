@@ -30,20 +30,28 @@ async function api(path, options) {
 function Icon({ name }) {
   const icons = {
     play: <path d="m9 7 8 5-8 5V7Z" />,
+    pause: <><path d="M9 7v10"/><path d="M15 7v10"/></>,
     lock: <><rect x="6" y="10" width="12" height="9" rx="2"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></>,
     unlock: <><rect x="6" y="10" width="12" height="9" rx="2"/><path d="M9 10V7a3 3 0 0 1 5.4-1.8"/></>,
     download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 20h14"/></>,
     trash: <><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7"/><path d="M10 11v5m4-5v5"/></>,
     refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .7-8.7L20 11"/></>,
     rotate: <><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 1-2-5"/></>,
+    fullscreen: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
+    fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></>,
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
 }
 
 function RotatedVideo({ src, rotation }) {
+  const playerRef = useRef(null)
   const stageRef = useRef(null)
   const videoRef = useRef(null)
   const [layout, setLayout] = useState({ width: 0, height: 0 })
+  const [playing, setPlaying] = useState(true)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [fullscreen, setFullscreen] = useState(false)
 
   const updateLayout = useCallback(() => {
     const stage = stageRef.current
@@ -70,19 +78,79 @@ function RotatedVideo({ src, rotation }) {
     return () => observer.disconnect()
   }, [updateLayout])
 
-  return <div className="video-stage" ref={stageRef}>
-    <video
-      ref={videoRef}
-      controls
-      autoPlay
-      src={src}
-      onLoadedMetadata={updateLayout}
-      style={{
-        width: layout.width ? `${layout.width}px` : 0,
-        height: layout.height ? `${layout.height}px` : 0,
-        transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
-      }}
-    />
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullscreen(document.fullscreenElement === playerRef.current)
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  const togglePlayback = () => {
+    const video = videoRef.current
+    if (!video) return
+    if (video.paused) video.play().catch(() => setPlaying(false))
+    else video.pause()
+  }
+
+  const seek = (event) => {
+    const video = videoRef.current
+    if (!video) return
+    const nextTime = Number(event.target.value)
+    video.currentTime = nextTime
+    setCurrentTime(nextTime)
+  }
+
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen()
+      else await playerRef.current?.requestFullscreen()
+    } catch {
+      setFullscreen(false)
+    }
+  }
+
+  return <div className="video-player" ref={playerRef}>
+    <div className="video-stage" ref={stageRef}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        src={src}
+        onClick={togglePlayback}
+        onLoadedMetadata={() => {
+          updateLayout()
+          setDuration(Number.isFinite(videoRef.current?.duration) ? videoRef.current.duration : 0)
+        }}
+        onTimeUpdate={event => setCurrentTime(event.currentTarget.currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        style={{
+          width: layout.width ? `${layout.width}px` : 0,
+          height: layout.height ? `${layout.height}px` : 0,
+          transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+        }}
+      />
+    </div>
+    <div className="video-controls">
+      <input
+        type="range"
+        min="0"
+        max={duration || 0}
+        step="0.1"
+        value={Math.min(currentTime, duration || 0)}
+        onChange={seek}
+        aria-label="Video progress"
+      />
+      <div className="video-control-row">
+        <button type="button" className="playback-control" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'} title={playing ? 'Pause' : 'Play'}>
+          <Icon name={playing ? 'pause' : 'play'} />
+        </button>
+        <span>{formatDuration(Math.floor(currentTime))} / {formatDuration(Math.floor(duration))}</span>
+        <button type="button" className="playback-control fullscreen-control" onClick={toggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+          <Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} />
+        </button>
+      </div>
+    </div>
   </div>
 }
 

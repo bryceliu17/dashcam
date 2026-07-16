@@ -76,6 +76,10 @@ class BackgroundRecordingService : Service() {
         when (intent?.action) {
             ACTION_STOP -> stopRecording()
             ACTION_STOP_AFTER_SEGMENT -> stopAfterCurrentSegment()
+            ACTION_QUERY_STATE -> {
+                broadcastState(continueRecording, currentElapsedSeconds(), currentFile?.name)
+                if (!continueRecording) stopSelf(startId)
+            }
             else -> startRecording()
         }
         return START_NOT_STICKY
@@ -378,6 +382,7 @@ class BackgroundRecordingService : Service() {
         const val ACTION_START = "com.example.dashcam.background.START"
         const val ACTION_STOP = "com.example.dashcam.background.STOP"
         const val ACTION_STOP_AFTER_SEGMENT = "com.example.dashcam.background.STOP_AFTER_SEGMENT"
+        const val ACTION_QUERY_STATE = "com.example.dashcam.background.QUERY_STATE"
         const val ACTION_STATE = "com.example.dashcam.background.STATE"
         const val EXTRA_ACTIVE = "active"
         const val EXTRA_ELAPSED_SECONDS = "elapsed_seconds"
