@@ -9,8 +9,10 @@ object PowerRecordingSettings {
     private const val PREFS = "dashcam_settings"
     private const val KEY_POWER_AUTO_BACKGROUND = "power_auto_background"
     private const val KEY_VOLUME_KEY_START = "volume_key_start"
+    private const val KEY_VOLUME_KEY_AUDIO_START = "volume_key_audio_start"
     private const val KEY_FOREGROUND_RECORDING_ACTIVE = "foreground_recording_active"
     private const val KEY_BACKGROUND_RECORDING_ACTIVE = "background_recording_active"
+    private const val KEY_AUDIO_RECORDING_ACTIVE = "audio_recording_active"
     private const val KEY_LEGACY_RECORDING_ACTIVE = "recording_active"
 
     fun isPowerAutoBackgroundEnabled(context: Context): Boolean =
@@ -19,7 +21,10 @@ object PowerRecordingSettings {
     fun setPowerAutoBackgroundEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().apply {
             putBoolean(KEY_POWER_AUTO_BACKGROUND, enabled)
-            if (enabled) putBoolean(KEY_VOLUME_KEY_START, false)
+            if (enabled) {
+                putBoolean(KEY_VOLUME_KEY_START, false)
+                putBoolean(KEY_VOLUME_KEY_AUDIO_START, false)
+            }
         }.apply()
     }
 
@@ -29,18 +34,39 @@ object PowerRecordingSettings {
     fun setVolumeKeyStartEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().apply {
             putBoolean(KEY_VOLUME_KEY_START, enabled)
-            if (enabled) putBoolean(KEY_POWER_AUTO_BACKGROUND, false)
+            if (enabled) {
+                putBoolean(KEY_POWER_AUTO_BACKGROUND, false)
+                putBoolean(KEY_VOLUME_KEY_AUDIO_START, false)
+            }
+        }.apply()
+    }
+
+    fun isVolumeKeyAudioStartEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_VOLUME_KEY_AUDIO_START, false)
+
+    fun setVolumeKeyAudioStartEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().apply {
+            putBoolean(KEY_VOLUME_KEY_AUDIO_START, enabled)
+            if (enabled) {
+                putBoolean(KEY_POWER_AUTO_BACKGROUND, false)
+                putBoolean(KEY_VOLUME_KEY_START, false)
+            }
         }.apply()
     }
 
     fun isAnyRecordingActive(context: Context): Boolean {
         val preferences = prefs(context)
-        return preferences.getBoolean(KEY_FOREGROUND_RECORDING_ACTIVE, false) ||
-            preferences.getBoolean(KEY_BACKGROUND_RECORDING_ACTIVE, false)
+        return isVideoRecordingActive(preferences) ||
+            preferences.getBoolean(KEY_AUDIO_RECORDING_ACTIVE, false)
     }
+
+    fun isVideoRecordingActive(context: Context): Boolean = isVideoRecordingActive(prefs(context))
 
     fun isBackgroundRecordingActive(context: Context): Boolean =
         prefs(context).getBoolean(KEY_BACKGROUND_RECORDING_ACTIVE, false)
+
+    fun isAudioRecordingActive(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_AUDIO_RECORDING_ACTIVE, false)
 
     fun isDeviceCharging(context: Context): Boolean {
         val battery = context.applicationContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -66,6 +92,14 @@ object PowerRecordingSettings {
             .putBoolean(KEY_LEGACY_RECORDING_ACTIVE, active || foregroundActive)
             .apply()
     }
+
+    fun setAudioRecordingActive(context: Context, active: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AUDIO_RECORDING_ACTIVE, active).apply()
+    }
+
+    private fun isVideoRecordingActive(preferences: android.content.SharedPreferences): Boolean =
+        preferences.getBoolean(KEY_FOREGROUND_RECORDING_ACTIVE, false) ||
+            preferences.getBoolean(KEY_BACKGROUND_RECORDING_ACTIVE, false)
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
