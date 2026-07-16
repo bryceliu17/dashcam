@@ -16,7 +16,8 @@ object StoragePolicy {
         val dao = DashcamDatabase.get(context).videoDao()
         val totalVideoBytes = dao.totalSize()
         var deletedCount = 0
-        val cleanupRequired = totalVideoBytes >= MAX_VIDEO_BYTES || videoDirectory.usableSpace < MIN_FREE_BYTES
+        val videoLimitReached = totalVideoBytes >= MAX_VIDEO_BYTES
+        val cleanupRequired = videoLimitReached || videoDirectory.usableSpace < MIN_FREE_BYTES
         if (cleanupRequired) {
             dao.cleanupCandidatesForLocalStorage().firstOrNull()?.let { candidate ->
                 val file = File(candidate.localPath)
@@ -28,7 +29,7 @@ object StoragePolicy {
         }
 
         return StoragePreparation(
-            canRecord = !cleanupRequired || deletedCount == 1,
+            canRecord = !videoLimitReached || deletedCount == 1,
             deletedCount = deletedCount
         )
     }
