@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.media.MediaPlayer
 import android.media.MediaMetadataRetriever
 import android.os.BatteryManager
 import android.os.Build
@@ -25,10 +26,12 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -51,11 +54,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.example.dashcam.data.AudioEntity
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.UploadStatus
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
+import com.example.dashcam.recording.AudioRecordingService
+import com.example.dashcam.recording.AudioStoragePolicy
 import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.recording.RecordingService
@@ -75,6 +81,7 @@ import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
     private lateinit var recordingStatus: TextView
+    private lateinit var audioStatus: TextView
     private lateinit var chargingStatus: TextView
     private lateinit var serverStatus: TextView
     private lateinit var storageStatus: TextView
@@ -82,14 +89,17 @@ class MainActivity : ComponentActivity() {
     private lateinit var serverUrlDisplay: TextView
     private lateinit var previewRecordButton: Button
     private lateinit var backgroundRecordButton: Button
+    private lateinit var audioRecordButton: Button
     private lateinit var recordingModeSpinner: Spinner
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<VideoEntity>
     private var videos: List<VideoEntity> = emptyList()
+    private var audioRecords: List<AudioEntity> = emptyList()
     private val recordedOrientationCache = mutableMapOf<String, String>()
     private var showingVideoManager = false
     private var showingVideoList = false
+    private var showingAudioList = false
     private var returnToVideoListAfterManager = false
     private var restoreVideoListScroll = false
     private var videoListFirstVisiblePosition = 0
@@ -107,10 +117,21 @@ class MainActivity : ComponentActivity() {
     private var completedSegmentsSinceManualStart = 0
     private var overwrittenVideosSinceManualStart = 0
     private var pendingBackgroundStart = false
+    private var pendingAudioStartAfterPermission = false
     private var editingServerUrl = false
     private var backgroundRecordingActive = false
     private var backgroundElapsedSeconds = 0
     private var backgroundFilename: String? = null
+    private var audioRecordingActive = false
+    private var audioElapsedSeconds = 0
+    private var audioFilename: String? = null
+    private var audioPlayer: MediaPlayer? = null
+    private var playingAudioPath: String? = null
+    private lateinit var audioPlaybackTitle: TextView
+    private lateinit var audioPlaybackTime: TextView
+    private lateinit var audioPlaybackSeekBar: SeekBar
+    private lateinit var audioPlaybackButton: ImageButton
+    private var audioPlaybackSeeking = false
     private var stopAfterCurrentSegment = false
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -132,6 +153,31 @@ class MainActivity : ComponentActivity() {
             toast("Microphone permission denied; $mode recording will be silent")
         }
         pendingBackgroundStart = false
+    }
+
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val startAfterPermission = pendingAudioStartAfterPermission
+        pendingAudioStartAfterPermission = false
+        if (permissions[Manifest.permission.RECORD_AUDIO] == true) {
+            if (startAfterPermission) {
+                startAudioRecording()
+            } else if (PowerRecordingSettings.isVolumeKeyAudioStartEnabled(this) &&
+                !isVolumeKeyAccessibilityEnabled()
+            ) {
+                toast("Enable Dashcam Volume Up Double-Press in Accessibility settings")
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        } else {
+            toast("Microphone permission is required")
+        }
+    }
+    private val audioPlaybackRunnable = object : Runnable {
+        override fun run() {
+            updateAudioPlaybackControls()
+            if (showingAudioList && audioPlayer != null) mainHandler.postDelayed(this, 500)
+        }
     }
 
     private val stateReceiver = object : BroadcastReceiver() {
@@ -179,9 +225,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val audioStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            audioRecordingActive = intent?.getBooleanExtra(AudioRecordingService.EXTRA_ACTIVE, false) == true
+            audioElapsedSeconds = intent?.getIntExtra(AudioRecordingService.EXTRA_ELAPSED_SECONDS, 0) ?: 0
+            audioFilename = intent?.getStringExtra(AudioRecordingService.EXTRA_FILENAME)
+            updateRecordingStatus()
+            intent?.getStringExtra(AudioRecordingService.EXTRA_MESSAGE)?.let(::toast)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         backgroundRecordingActive = PowerRecordingSettings.isBackgroundRecordingActive(this)
+        audioRecordingActive = PowerRecordingSettings.isAudioRecordingActive(this)
         val prefs = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
         buildUi()
         serverUrl.setText(prefs.getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL))
@@ -189,6 +246,8 @@ class MainActivity : ComponentActivity() {
         if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) PowerMonitorService.start(this)
         renderRecording(false)
         observeVideos()
+        observeAudioRecords()
+        syncExistingAudioFiles()
         checkServer()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -198,6 +257,10 @@ class MainActivity : ComponentActivity() {
                     if (returnToVideoListAfterManager) showLocalVideos() else buildUi()
                 } else if (showingVideoList) {
                     showingVideoList = false
+                    buildUi()
+                } else if (showingAudioList) {
+                    showingAudioList = false
+                    stopAudioPlayback()
                     buildUi()
                 } else {
                     isEnabled = false
@@ -211,6 +274,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, backgroundStateReceiver, IntentFilter(BackgroundRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, audioStateReceiver, IntentFilter(AudioRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, powerReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
@@ -220,7 +284,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!showingVideoList && !showingVideoManager) {
+        if (!showingVideoList && !showingVideoManager && !showingAudioList) {
             refreshHomeStatus()
         } else {
             updateModeButtons()
@@ -231,9 +295,11 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         try { unregisterReceiver(stateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(backgroundStateReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(audioStateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(batteryReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(powerReceiver) } catch (_: IllegalArgumentException) { }
         RecordingService.previewSurfaceProvider = null
+        stopAudioPlayback()
         super.onStop()
     }
 
@@ -245,6 +311,7 @@ class MainActivity : ComponentActivity() {
 
     private fun buildUi() {
         showingVideoList = false
+        showingAudioList = false
         returnToVideoListAfterManager = false
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(244, 244, 240))
@@ -262,10 +329,11 @@ class MainActivity : ComponentActivity() {
         })
 
         recordingStatus = statusRow("Recording")
+        audioStatus = statusRow("Audio")
         chargingStatus = statusRow("Power")
         serverStatus = statusRow("Home Server")
         storageStatus = statusRow("Local Videos")
-        listOf(recordingStatus, chargingStatus, serverStatus, storageStatus).forEach(root::addView)
+        listOf(recordingStatus, audioStatus, chargingStatus, serverStatus, storageStatus).forEach(root::addView)
         updateStorageStatus()
 
         previewView = PreviewView(this).apply {
@@ -334,6 +402,15 @@ class MainActivity : ComponentActivity() {
         }
         backgroundControls.addView(backgroundRecordButton, LinearLayout.LayoutParams(-1, -1))
         root.addView(backgroundControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
+        val audioControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        audioRecordButton = actionButton(if (audioRecordingActive) "Stop Audio" else "Start Audio") {
+            if (audioRecordingActive) stopAudioRecording() else requestAudioStart()
+        }
+        audioControls.addView(audioRecordButton, weighted())
+        audioControls.addView(actionButton("Local Audio") {
+            showLocalAudio()
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(audioControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         root.addView(TextView(this).apply {
             text = "Recording Mode"
             textSize = 12f
@@ -366,6 +443,24 @@ class MainActivity : ComponentActivity() {
             showLocalVideos()
         }, weighted().apply { marginStart = dp(8) })
         root.addView(secondaryControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        val autoUploadControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        autoUploadControls.addView(actionButton(
+            if (UploadWorker.isAutomaticUploadEnabled(this)) "Auto Upload: On" else "Auto Upload: Off"
+        ) {
+            val enabled = !UploadWorker.isAutomaticUploadEnabled(this)
+            UploadWorker.setAutomaticUploadEnabled(this, enabled)
+            toast("Automatic upload ${if (enabled) "enabled" else "disabled"}")
+            buildUi()
+        }, LinearLayout.LayoutParams(-1, -1))
+        root.addView(autoUploadControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        val uploadTypeControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        uploadTypeControls.addView(actionButton("Upload Audio Only") {
+            startManualAudioUpload()
+        }, weighted())
+        uploadTypeControls.addView(actionButton("Upload Video Only") {
+            startManualVideoUpload()
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(uploadTypeControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         scroll.addView(root)
         setContentView(scroll)
         refreshHomeStatus()
@@ -388,7 +483,7 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(8))
         })
         root.addView(TextView(this).apply {
-            text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
+            text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.MAX_VIDEO_BYTES)}"
             textSize = 14f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, 0, 0, dp(10))
@@ -433,6 +528,347 @@ class MainActivity : ComponentActivity() {
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         setContentView(root)
         restoreVideoListScrollIfNeeded()
+    }
+
+    private fun showLocalAudio() {
+        stopAudioPlayback()
+        showingAudioList = true
+        showingVideoList = false
+        showingVideoManager = false
+        val audioFiles = loadAudioFiles()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setBackgroundColor(Color.rgb(244, 244, 240))
+        }
+        root.addView(TextView(this).apply {
+            text = "Local Audio"
+            textSize = 24f
+            setTextColor(Color.rgb(17, 24, 39))
+            setPadding(0, 0, 0, dp(8))
+        })
+        root.addView(TextView(this).apply {
+            text = "${audioFiles.size} recordings - ${formatBytes(audioFiles.sumOf { it.file.length() })} / ${formatBytes(AudioStoragePolicy.MAX_AUDIO_BYTES)}"
+            textSize = 14f
+            setTextColor(Color.rgb(55, 65, 81))
+            setPadding(0, 0, 0, dp(10))
+        })
+
+        val audioList = ListView(this).apply {
+            adapter = createAudioListAdapter(audioFiles)
+            dividerHeight = 1
+            setOnItemClickListener { _, _, position, _ ->
+                toggleAudioPlayback(audioFiles[position].file)
+            }
+            setOnItemLongClickListener { _, _, position, _ ->
+                showAudioActions(audioFiles[position])
+                true
+            }
+        }
+        root.addView(audioList, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        audioPlaybackTitle = TextView(this).apply {
+            text = "No audio selected"
+            textSize = 13f
+            setTextColor(Color.rgb(31, 41, 55))
+            setSingleLine(true)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        root.addView(audioPlaybackTitle, LinearLayout.LayoutParams(-1, dp(28)))
+        val playbackBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        audioPlaybackButton = playbackIconButton(
+            android.R.drawable.ic_media_play,
+            "Play audio"
+        ) {
+            toggleCurrentAudioPlayback()
+        }.apply { isEnabled = false }
+        playbackBar.addView(audioPlaybackButton, LinearLayout.LayoutParams(dp(40), dp(40)))
+        playbackBar.addView(playbackIconButton(
+            android.R.drawable.ic_menu_close_clear_cancel,
+            "Stop audio"
+        ) {
+            stopAudioPlayback()
+        }, LinearLayout.LayoutParams(dp(40), dp(40)))
+        audioPlaybackSeekBar = SeekBar(this).apply {
+            max = 0
+            progress = 0
+            isEnabled = false
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    try { audioPlayer?.seekTo(progress) } catch (_: IllegalStateException) { }
+                    updateAudioPlaybackTime(progress, seekBar?.max ?: 0)
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                    audioPlaybackSeeking = true
+                }
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    audioPlaybackSeeking = false
+                    updateAudioPlaybackControls()
+                }
+            })
+        }
+        root.addView(audioPlaybackSeekBar, LinearLayout.LayoutParams(-1, dp(36)))
+        playbackBar.addView(View(this), LinearLayout.LayoutParams(0, dp(1), 1f))
+        audioPlaybackTime = TextView(this).apply {
+            text = "00:00 / 00:00"
+            textSize = 11f
+            setTextColor(Color.rgb(75, 85, 99))
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            setSingleLine(true)
+        }
+        playbackBar.addView(audioPlaybackTime, LinearLayout.LayoutParams(dp(104), dp(40)))
+        root.addView(playbackBar, LinearLayout.LayoutParams(-1, dp(42)))
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        controls.addView(actionButton("Back") {
+            stopAudioPlayback()
+            showingAudioList = false
+            buildUi()
+        }, weighted())
+        controls.addView(actionButton("Delete All") {
+            confirmDeleteAllAudio(audioFiles)
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
+        setContentView(root)
+    }
+
+    private fun loadAudioFiles(): List<AudioFileInfo> {
+        val directory = audioDirectory()
+        return directory.listFiles()
+            .orEmpty()
+            .filter { it.isFile && it.extension.equals("m4a", ignoreCase = true) }
+            .map { file ->
+                val retriever = MediaMetadataRetriever()
+                val durationSeconds = try {
+                    retriever.setDataSource(file.absolutePath)
+                    ((retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L) / 1000L)
+                        .toInt()
+                } catch (_: Exception) {
+                    0
+                } finally {
+                    retriever.release()
+                }
+                val record = audioRecords.firstOrNull { it.localPath == file.absolutePath }
+                AudioFileInfo(file, record?.durationSeconds ?: durationSeconds, record?.startTime ?: audioStartTime(file), record)
+            }
+            .sortedByDescending { it.startedAt }
+    }
+
+    private fun audioDirectory(): File {
+        val musicRoot = getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: filesDir
+        return File(musicRoot, AudioRecordingService.AUDIO_DIRECTORY).apply { mkdirs() }
+    }
+
+    private fun audioStartTime(file: File): Long = try {
+        SimpleDateFormat("'audio_'yyyyMMdd_HHmmss_SSS'.m4a'", Locale.US).parse(file.name)?.time
+            ?: file.lastModified()
+    } catch (_: Exception) {
+        file.lastModified()
+    }
+
+    private fun formatAudioFile(audio: AudioFileInfo): String {
+        val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM, Locale.getDefault())
+            .format(Date(audio.startedAt))
+        val status = audio.record?.uploadStatus ?: UploadStatus.Pending
+        val lock = if (audio.record?.locked == true) "LOCKED" else "NORMAL"
+        val error = audio.record?.errorMessage?.let { "\n$it" }.orEmpty()
+        return "$date  ${audio.file.name}\n${formatDurationSeconds(audio.durationSeconds)} - ${formatBytes(audio.file.length())} - $status - $lock$error"
+    }
+
+    private fun createAudioListAdapter(items: List<AudioFileInfo>) =
+        object : ArrayAdapter<AudioFileInfo>(this, android.R.layout.simple_list_item_1, items) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent) as TextView
+                val audio = getItem(position) ?: return view
+                view.text = formatAudioFile(audio)
+                view.textSize = 14f
+                view.setTextColor(Color.rgb(17, 24, 39))
+                view.setPadding(dp(12), dp(10), dp(12), dp(10))
+                view.setBackgroundColor(uploadStatusBackground(audio.record?.uploadStatus ?: UploadStatus.Pending))
+                return view
+            }
+        }
+
+    private fun showAudioActions(audio: AudioFileInfo) {
+        val record = audio.record
+        val lockAction = if (record?.locked == true) "Unlock" else "Lock"
+        AlertDialog.Builder(this)
+            .setTitle(audio.file.name)
+            .setItems(arrayOf(lockAction, "Delete")) { _, which ->
+                if (which == 0 && record != null) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        DashcamDatabase.get(this@MainActivity).audioDao().toggleLock(record.id)
+                        withContext(Dispatchers.Main) { showLocalAudio() }
+                    }
+                } else if (which == 0) {
+                    toast("Audio record is still being indexed")
+                } else {
+                    confirmDeleteAudio(audio.file)
+                }
+            }
+            .show()
+    }
+
+    private fun toggleAudioPlayback(file: File) {
+        if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
+            toast("Stop audio recording before playback")
+            return
+        }
+        val currentPlayer = audioPlayer
+        if (playingAudioPath == file.absolutePath && currentPlayer != null) {
+            try {
+                if (currentPlayer.isPlaying) {
+                    currentPlayer.pause()
+                } else {
+                    currentPlayer.start()
+                }
+                updateAudioPlaybackControls()
+            } catch (_: IllegalStateException) {
+                stopAudioPlayback()
+                toast("Audio is still loading")
+            }
+            return
+        }
+
+        stopAudioPlayback()
+        try {
+            val player = MediaPlayer()
+            audioPlayer = player
+            playingAudioPath = file.absolutePath
+            audioPlaybackTitle.text = file.name
+            player.setDataSource(file.absolutePath)
+            player.setOnPreparedListener {
+                if (audioPlayer === it) {
+                    audioPlaybackSeekBar.max = it.duration.coerceAtLeast(0)
+                    audioPlaybackSeekBar.isEnabled = true
+                    audioPlaybackButton.isEnabled = true
+                    it.start()
+                    startAudioPlaybackUpdates()
+                }
+            }
+            player.setOnCompletionListener {
+                if (audioPlayer === it) stopAudioPlayback()
+            }
+            player.setOnErrorListener { _, _, _ ->
+                stopAudioPlayback()
+                toast("Unable to play ${file.name}")
+                true
+            }
+            player.prepareAsync()
+        } catch (_: Exception) {
+            stopAudioPlayback()
+            toast("Unable to play ${file.name}")
+        }
+    }
+
+    private fun stopAudioPlayback() {
+        mainHandler.removeCallbacks(audioPlaybackRunnable)
+        val player = audioPlayer
+        audioPlayer = null
+        playingAudioPath = null
+        audioPlaybackSeeking = false
+        try { player?.stop() } catch (_: IllegalStateException) { }
+        player?.release()
+        if (showingAudioList && ::audioPlaybackSeekBar.isInitialized) {
+            audioPlaybackSeekBar.progress = 0
+            audioPlaybackSeekBar.max = 0
+            audioPlaybackSeekBar.isEnabled = false
+            audioPlaybackTitle.text = "No audio selected"
+            audioPlaybackTime.text = "00:00 / 00:00"
+            audioPlaybackButton.setImageResource(android.R.drawable.ic_media_play)
+            audioPlaybackButton.contentDescription = "Play audio"
+            audioPlaybackButton.isEnabled = false
+        }
+    }
+
+    private fun toggleCurrentAudioPlayback() {
+        val player = audioPlayer ?: run {
+            toast("Select an audio recording first")
+            return
+        }
+        try {
+            if (player.isPlaying) player.pause() else player.start()
+            startAudioPlaybackUpdates()
+        } catch (_: IllegalStateException) {
+            toast("Audio is still loading")
+        }
+    }
+
+    private fun startAudioPlaybackUpdates() {
+        mainHandler.removeCallbacks(audioPlaybackRunnable)
+        mainHandler.post(audioPlaybackRunnable)
+    }
+
+    private fun updateAudioPlaybackControls() {
+        if (!showingAudioList || !::audioPlaybackSeekBar.isInitialized) return
+        val player = audioPlayer ?: return
+        try {
+            val duration = player.duration.coerceAtLeast(0)
+            val position = player.currentPosition.coerceIn(0, duration)
+            audioPlaybackSeekBar.max = duration
+            if (!audioPlaybackSeeking) audioPlaybackSeekBar.progress = position
+            updateAudioPlaybackTime(position, duration)
+            val playing = player.isPlaying
+            audioPlaybackButton.setImageResource(
+                if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            )
+            audioPlaybackButton.contentDescription = if (playing) "Pause audio" else "Play audio"
+        } catch (_: IllegalStateException) { }
+    }
+
+    private fun updateAudioPlaybackTime(positionMs: Int, durationMs: Int) {
+        if (!::audioPlaybackTime.isInitialized) return
+        audioPlaybackTime.text = "${formatDuration(positionMs.toLong())} / ${formatDuration(durationMs.toLong())}"
+    }
+
+    private fun confirmDeleteAudio(file: File) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete audio recording?")
+            .setMessage(file.name)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                if (playingAudioPath == file.absolutePath) stopAudioPlayback()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val deleted = file.delete()
+                    if (deleted) DashcamDatabase.get(this@MainActivity).audioDao().deleteByLocalPath(file.absolutePath)
+                    withContext(Dispatchers.Main) {
+                        toast(if (deleted) "Deleted ${file.name}" else "Unable to delete ${file.name}")
+                        showLocalAudio()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun confirmDeleteAllAudio(audioFiles: List<AudioFileInfo>) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete all audio recordings?")
+            .setMessage("This will permanently delete ${audioFiles.size} saved audio recordings.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete All") { _, _ ->
+                stopAudioPlayback()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val dao = DashcamDatabase.get(this@MainActivity).audioDao()
+                    var deleted = 0
+                    audioFiles.forEach {
+                        if (it.file.delete()) {
+                            dao.deleteByLocalPath(it.file.absolutePath)
+                            deleted += 1
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        toast("Deleted $deleted audio recordings")
+                        showLocalAudio()
+                    }
+                }
+            }
+            .show()
     }
 
     private fun createVideoListAdapter() =
@@ -686,12 +1122,16 @@ class MainActivity : ComponentActivity() {
     private fun weighted() = LinearLayout.LayoutParams(0, -1, 1f)
 
     private fun requestStart() {
+        if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
+            toast("Stop audio recording first")
+            return
+        }
         if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) {
             toast("Turn off Power Auto Background before preview recording")
             return
         }
         if (PowerRecordingSettings.isVolumeKeyStartEnabled(this)) {
-            toast("Turn off Volume Up Double-Press before preview recording")
+            toast("Select Frontend Recording before preview recording")
             return
         }
         if (backgroundRecordingActive) {
@@ -706,6 +1146,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestBackgroundStart() {
+        if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
+            toast("Stop audio recording first")
+            return
+        }
         if (recording != null || continueRecording) {
             toast("Stop dashcam recording first")
             return
@@ -722,6 +1166,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startBackgroundDashcam() {
+        if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
+            toast("Stop audio recording first")
+            return
+        }
         if (recording != null || continueRecording) {
             toast("Stop dashcam recording first")
             return
@@ -742,6 +1190,46 @@ class MainActivity : ComponentActivity() {
         PowerRecordingSettings.setBackgroundRecordingActive(this, false)
         updateBackgroundRecordButton()
         toast("Stopping background recording")
+    }
+
+    private fun requestAudioStart() {
+        if (recording != null || continueRecording || backgroundRecordingActive ||
+            PowerRecordingSettings.isBackgroundRecordingActive(this)
+        ) {
+            toast("Stop video recording first")
+            return
+        }
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
+        if (permissions.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }) {
+            startAudioRecording()
+        } else {
+            pendingAudioStartAfterPermission = true
+            audioPermissionLauncher.launch(permissions.toTypedArray())
+        }
+    }
+
+    private fun startAudioRecording() {
+        if (recording != null || continueRecording || backgroundRecordingActive ||
+            PowerRecordingSettings.isBackgroundRecordingActive(this)
+        ) {
+            toast("Stop video recording first")
+            return
+        }
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, AudioRecordingService::class.java).setAction(AudioRecordingService.ACTION_START)
+        )
+        audioRecordingActive = true
+        audioElapsedSeconds = 0
+        audioFilename = null
+        updateRecordingStatus()
+        toast("Audio recording starting")
+    }
+
+    private fun stopAudioRecording() {
+        startService(Intent(this, AudioRecordingService::class.java).setAction(AudioRecordingService.ACTION_STOP))
+        toast("Stopping and saving current audio segment")
     }
 
     private fun requestStopAfterCurrentSegment() {
@@ -766,23 +1254,43 @@ class MainActivity : ComponentActivity() {
             RecordingMode.Frontend -> {
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
                 PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
                 PowerMonitorService.stop(this)
             }
             RecordingMode.PowerAuto -> {
                 PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, true)
                 PowerMonitorService.start(this)
             }
-            RecordingMode.VolumeDoublePress -> {
+            RecordingMode.VolumeVideoDoublePress -> {
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
                 PowerRecordingSettings.setVolumeKeyStartEnabled(this, true)
+                PowerMonitorService.stop(this)
+            }
+            RecordingMode.VolumeAudioDoublePress -> {
+                PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, true)
                 PowerMonitorService.stop(this)
             }
         }
         updateModeButtons()
         updatePreviewAvailability()
         updateRecordingStatus()
-        if (mode == RecordingMode.VolumeDoublePress && !isVolumeKeyAccessibilityEnabled()) {
+        if (mode == RecordingMode.VolumeAudioDoublePress &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingAudioStartAfterPermission = false
+            val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
+            audioPermissionLauncher.launch(permissions.toTypedArray())
+            return
+        }
+        if ((mode == RecordingMode.VolumeVideoDoublePress || mode == RecordingMode.VolumeAudioDoublePress) &&
+            !isVolumeKeyAccessibilityEnabled()
+        ) {
             toast("Enable Dashcam Volume Up Double-Press in Accessibility settings")
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         } else {
@@ -801,7 +1309,8 @@ class MainActivity : ComponentActivity() {
 
     private fun currentRecordingMode(): RecordingMode = when {
         PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) -> RecordingMode.PowerAuto
-        PowerRecordingSettings.isVolumeKeyStartEnabled(this) -> RecordingMode.VolumeDoublePress
+        PowerRecordingSettings.isVolumeKeyStartEnabled(this) -> RecordingMode.VolumeVideoDoublePress
+        PowerRecordingSettings.isVolumeKeyAudioStartEnabled(this) -> RecordingMode.VolumeAudioDoublePress
         else -> RecordingMode.Frontend
     }
 
@@ -817,11 +1326,16 @@ class MainActivity : ComponentActivity() {
     private fun updateBackgroundRecordButton() {
         if (::backgroundRecordButton.isInitialized) {
             backgroundRecordButton.text = if (backgroundRecordingActive) "Stop Background" else "Start Background"
-            backgroundRecordButton.isEnabled = backgroundRecordingActive || (recording == null && !continueRecording)
+            backgroundRecordButton.isEnabled = backgroundRecordingActive ||
+                (recording == null && !continueRecording && !audioRecordingActive)
         }
     }
 
     private fun startDashcam() {
+        if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
+            toast("Stop audio recording first")
+            return
+        }
         if (backgroundRecordingActive) {
             toast("Stop background recording first")
             return
@@ -1143,7 +1657,49 @@ class MainActivity : ComponentActivity() {
 
     private fun updateStorageStatus() {
         if (!::storageStatus.isInitialized) return
-        storageStatus.text = "Local Videos: ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })}"
+        storageStatus.text = "Local Videos: ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.MAX_VIDEO_BYTES)}"
+    }
+
+    private fun observeAudioRecords() {
+        lifecycleScope.launch {
+            DashcamDatabase.get(this@MainActivity).audioDao().observeAll().collectLatest { items ->
+                audioRecords = items
+            }
+        }
+    }
+
+    private fun syncExistingAudioFiles() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val dao = DashcamDatabase.get(this@MainActivity).audioDao()
+            var added = false
+            audioDirectory().listFiles().orEmpty()
+                .filter { it.isFile && it.extension.equals("m4a", ignoreCase = true) }
+                .forEach { file ->
+                    if (dao.findByLocalPath(file.absolutePath) != null) return@forEach
+                    val retriever = MediaMetadataRetriever()
+                    val durationSeconds = try {
+                        retriever.setDataSource(file.absolutePath)
+                        ((retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L) / 1000L).toInt()
+                    } catch (_: Exception) {
+                        0
+                    } finally {
+                        retriever.release()
+                    }
+                    val startedAt = audioStartTime(file)
+                    dao.insert(
+                        AudioEntity(
+                            filename = file.name,
+                            localPath = file.absolutePath,
+                            startTime = startedAt,
+                            endTime = startedAt + durationSeconds * 1000L,
+                            durationSeconds = durationSeconds,
+                            fileSizeBytes = file.length()
+                        )
+                    )
+                    added = true
+                }
+            if (added) UploadWorker.enqueueNow(this@MainActivity)
+        }
     }
 
     private fun checkServer(showResult: Boolean = false) {
@@ -1159,7 +1715,23 @@ class MainActivity : ComponentActivity() {
     private fun startManualUpload() {
         saveServerUrl()
         val workId = UploadWorker.enqueueManual(this)
-        toast("Upload started (Wi-Fi only)")
+        observeManualUpload(workId, "Upload started (Wi-Fi only)")
+    }
+
+    private fun startManualAudioUpload() {
+        saveServerUrl()
+        val workId = UploadWorker.enqueueManualAudio(this)
+        observeManualUpload(workId, "Audio upload started (Wi-Fi only)")
+    }
+
+    private fun startManualVideoUpload() {
+        saveServerUrl()
+        val workId = UploadWorker.enqueueManualVideo(this)
+        observeManualUpload(workId, "Video upload started (Wi-Fi only)")
+    }
+
+    private fun observeManualUpload(workId: java.util.UUID, startedMessage: String) {
+        toast(startedMessage)
         WorkManager.getInstance(this).getWorkInfoByIdLiveData(workId).observe(this) { info ->
             when (info?.state) {
                 WorkInfo.State.SUCCEEDED -> toast(info.outputData.getString(UploadWorker.KEY_MESSAGE) ?: "Upload complete")
@@ -1190,11 +1762,18 @@ class MainActivity : ComponentActivity() {
             backgroundElapsedSeconds = 0
             backgroundFilename = null
         }
+        audioRecordingActive = PowerRecordingSettings.isAudioRecordingActive(this)
+        if (!audioRecordingActive) {
+            audioElapsedSeconds = 0
+            audioFilename = null
+        }
         updateStorageStatus()
         renderCharging(currentBatteryIntent())
         updateRecordingStatus()
+        renderAudioStatus()
         if (::previewView.isInitialized) updatePreviewAvailability()
         queryBackgroundRecordingState()
+        queryAudioRecordingState()
         if (::serverStatus.isInitialized && ::serverUrl.isInitialized) checkServer()
     }
 
@@ -1203,6 +1782,30 @@ class MainActivity : ComponentActivity() {
             Intent(this, BackgroundRecordingService::class.java)
                 .setAction(BackgroundRecordingService.ACTION_QUERY_STATE)
         )
+    }
+
+    private fun queryAudioRecordingState() {
+        startService(
+            Intent(this, AudioRecordingService::class.java)
+                .setAction(AudioRecordingService.ACTION_QUERY_STATE)
+        )
+    }
+
+    private fun renderAudioStatus() {
+        if (::audioStatus.isInitialized) {
+            val name = audioFilename?.let { " - $it" }.orEmpty()
+            audioStatus.text = if (audioRecordingActive) {
+                "Audio: Recording - Current segment: ${formatDurationSeconds(audioElapsedSeconds)}$name"
+            } else {
+                "Audio: Stopped"
+            }
+        }
+        if (::audioRecordButton.isInitialized) {
+            audioRecordButton.text = if (audioRecordingActive) "Stop Audio" else "Start Audio"
+            audioRecordButton.isEnabled = audioRecordingActive ||
+                (recording == null && !continueRecording && !backgroundRecordingActive)
+        }
+        updateBackgroundRecordButton()
     }
 
     private fun updateRecordingStatus(activeOverride: Boolean? = null) {
@@ -1228,10 +1831,12 @@ class MainActivity : ComponentActivity() {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
             previewRecordButton.isEnabled = active ||
                 (!backgroundRecordingActive &&
+                    !audioRecordingActive &&
                     !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) &&
                     !PowerRecordingSettings.isVolumeKeyStartEnabled(this))
         }
         updateBackgroundRecordButton()
+        renderAudioStatus()
         updateModeButtons()
     }
 
@@ -1310,6 +1915,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    private fun playbackIconButton(icon: Int, description: String, action: () -> Unit) =
+        ImageButton(this).apply {
+            setImageResource(icon)
+            contentDescription = description
+            tooltipText = description
+            setColorFilter(Color.rgb(31, 41, 55))
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            setOnClickListener { action() }
+        }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     companion object {
@@ -1319,6 +1934,14 @@ class MainActivity : ComponentActivity() {
     private enum class RecordingMode(val label: String) {
         Frontend("Frontend Recording"),
         PowerAuto("Power Auto Background"),
-        VolumeDoublePress("Volume Up Double-Press")
+        VolumeVideoDoublePress("Volume Up Double-Press Video"),
+        VolumeAudioDoublePress("Volume Up Double-Press Audio")
     }
+
+    private data class AudioFileInfo(
+        val file: File,
+        val durationSeconds: Int,
+        val startedAt: Long,
+        val record: AudioEntity?
+    )
 }

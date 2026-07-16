@@ -1,5 +1,6 @@
 package com.example.dashcam.network
 
+import com.example.dashcam.data.AudioEntity
 import com.example.dashcam.data.VideoEntity
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -37,6 +38,25 @@ class ServerClient(private val baseUrl: String) {
             .addFormDataPart("playbackRotationDegrees", playbackRotationDegrees.toString())
             .build()
         val request = Request.Builder().url("${cleanBase()}/api/videos/upload").post(body).build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
+            return JSONObject(text).getLong("id")
+        }
+    }
+
+    fun uploadAudio(audio: AudioEntity): Long {
+        val file = File(audio.localPath)
+        require(file.exists()) { "Local file is missing: ${audio.filename}" }
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("file", audio.filename, file.asRequestBody("audio/mp4".toMediaType()))
+            .addFormDataPart("filename", audio.filename)
+            .addFormDataPart("startTime", Instant.ofEpochMilli(audio.startTime).toString())
+            .addFormDataPart("endTime", Instant.ofEpochMilli(audio.endTime).toString())
+            .addFormDataPart("durationSeconds", audio.durationSeconds.toString())
+            .addFormDataPart("fileSizeBytes", file.length().toString())
+            .build()
+        val request = Request.Builder().url("${cleanBase()}/api/audio/upload").post(body).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")

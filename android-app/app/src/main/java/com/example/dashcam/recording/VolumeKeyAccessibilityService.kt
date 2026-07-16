@@ -24,7 +24,9 @@ class VolumeKeyAccessibilityService : AccessibilityService() {
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
-        if (!PowerRecordingSettings.isVolumeKeyStartEnabled(this)) return false
+        if (!PowerRecordingSettings.isVolumeKeyStartEnabled(this) &&
+            !PowerRecordingSettings.isVolumeKeyAudioStartEnabled(this)
+        ) return false
 
         if (event.keyCode != KeyEvent.KEYCODE_VOLUME_UP) return false
 
@@ -42,7 +44,11 @@ class VolumeKeyAccessibilityService : AccessibilityService() {
 
         if (isDoublePress) {
             lastVolumeUpTime = 0L
-            startBackgroundRecording()
+            if (PowerRecordingSettings.isVolumeKeyAudioStartEnabled(this)) {
+                startAudioRecording()
+            } else {
+                startBackgroundRecording()
+            }
         } else {
             lastVolumeUpTime = eventTime
         }
@@ -64,6 +70,24 @@ class VolumeKeyAccessibilityService : AccessibilityService() {
         } catch (error: RuntimeException) {
             PowerRecordingSettings.setBackgroundRecordingActive(this, false)
             Toast.makeText(this, "Unable to start background recording", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun startAudioRecording() {
+        if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) return
+        if (PowerRecordingSettings.isAnyRecordingActive(this)) return
+
+        try {
+            Log.i(TAG, "Volume up double-press detected; starting audio recording")
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, AudioRecordingService::class.java)
+                    .setAction(AudioRecordingService.ACTION_START)
+            )
+            Toast.makeText(this, "Volume up double-press started audio recording", Toast.LENGTH_SHORT).show()
+        } catch (error: RuntimeException) {
+            PowerRecordingSettings.setAudioRecordingActive(this, false)
+            Toast.makeText(this, "Unable to start audio recording", Toast.LENGTH_LONG).show()
         }
     }
 
