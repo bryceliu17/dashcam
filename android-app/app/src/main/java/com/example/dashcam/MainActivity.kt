@@ -21,6 +21,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -28,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -78,8 +80,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var serverUrlDisplay: TextView
     private lateinit var previewRecordButton: Button
     private lateinit var backgroundRecordButton: Button
-    private lateinit var powerAutoButton: Button
-    private lateinit var volumeKeyButton: Button
+    private lateinit var recordingModeSpinner: Spinner
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<VideoEntity>
@@ -328,14 +329,30 @@ class MainActivity : ComponentActivity() {
         }
         backgroundControls.addView(backgroundRecordButton, LinearLayout.LayoutParams(-1, -1))
         root.addView(backgroundControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
-        powerAutoButton = actionButton(powerAutoButtonLabel()) {
-            togglePowerAutoBackground()
+        root.addView(TextView(this).apply {
+            text = "Recording Mode"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(14), 0, dp(5))
+        })
+        recordingModeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                RecordingMode.entries.map { it.label }
+            )
+            setSelection(currentRecordingMode().ordinal, false)
+            setBackgroundColor(Color.WHITE)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val selectedMode = RecordingMode.entries.getOrNull(position) ?: return
+                    if (selectedMode != currentRecordingMode()) setRecordingMode(selectedMode)
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
         }
-        root.addView(powerAutoButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
-        volumeKeyButton = actionButton(volumeKeyButtonLabel()) {
-            toggleVolumeKeyStart()
-        }
-        root.addView(volumeKeyButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(recordingModeSpinner, LinearLayout.LayoutParams(-1, dp(52)))
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             startManualUpload()
@@ -756,61 +773,49 @@ class MainActivity : ComponentActivity() {
         if (handled) toast("Power disconnected; stopping after current segment")
     }
 
-    private fun togglePowerAutoBackground() {
-        val enabled = !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
-        if (enabled) PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
-        PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, enabled)
-        if (enabled) PowerMonitorService.start(this) else PowerMonitorService.stop(this)
-        updateModeButtons()
-        updatePreviewAvailability()
-        updateRecordingStatus()
-        toast(if (enabled) "Power auto background enabled" else "Power auto background disabled")
-    }
-
-    private fun toggleVolumeKeyStart() {
-        val enabled = !PowerRecordingSettings.isVolumeKeyStartEnabled(this)
-        if (enabled) {
-            PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
-            PowerMonitorService.stop(this)
+    private fun setRecordingMode(mode: RecordingMode) {
+        when (mode) {
+            RecordingMode.Frontend -> {
+                PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
+                PowerMonitorService.stop(this)
+            }
+            RecordingMode.PowerAuto -> {
+                PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
+                PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, true)
+                PowerMonitorService.start(this)
+            }
+            RecordingMode.VolumeDoublePress -> {
+                PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyStartEnabled(this, true)
+                PowerMonitorService.stop(this)
+            }
         }
-        PowerRecordingSettings.setVolumeKeyStartEnabled(this, enabled)
         updateModeButtons()
         updatePreviewAvailability()
         updateRecordingStatus()
-        if (enabled && !isVolumeKeyAccessibilityEnabled()) {
+        if (mode == RecordingMode.VolumeDoublePress && !isVolumeKeyAccessibilityEnabled()) {
             toast("Enable Dashcam Volume Up Double-Press in Accessibility settings")
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         } else {
-            toast(if (enabled) "Volume up double-press enabled" else "Volume up double-press disabled")
+            toast("Recording mode: ${mode.label}")
         }
     }
 
     private fun updateModeButtons() {
-        val powerEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
-        val volumeEnabled = PowerRecordingSettings.isVolumeKeyStartEnabled(this)
-        if (::powerAutoButton.isInitialized) {
-            powerAutoButton.text = powerAutoButtonLabel()
-            powerAutoButton.isEnabled = powerEnabled || !volumeEnabled
-        }
-        if (::volumeKeyButton.isInitialized) {
-            volumeKeyButton.text = volumeKeyButtonLabel()
-            volumeKeyButton.isEnabled = volumeEnabled || !powerEnabled
+        if (::recordingModeSpinner.isInitialized) {
+            val position = currentRecordingMode().ordinal
+            if (recordingModeSpinner.selectedItemPosition != position) {
+                recordingModeSpinner.setSelection(position, false)
+            }
         }
     }
 
-    private fun powerAutoButtonLabel(): String =
-        if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) {
-            "Power Auto Background: ON"
-        } else {
-            "Power Auto Background: OFF"
-        }
-
-    private fun volumeKeyButtonLabel(): String =
-        if (PowerRecordingSettings.isVolumeKeyStartEnabled(this)) {
-            "Volume Up Double-Press: ON"
-        } else {
-            "Volume Up Double-Press: OFF"
-        }
+    private fun currentRecordingMode(): RecordingMode = when {
+        PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) -> RecordingMode.PowerAuto
+        PowerRecordingSettings.isVolumeKeyStartEnabled(this) -> RecordingMode.VolumeDoublePress
+        else -> RecordingMode.Frontend
+    }
 
     private fun isVolumeKeyAccessibilityEnabled(): Boolean {
         val expected = ComponentName(this, VolumeKeyAccessibilityService::class.java).flattenToString()
@@ -1323,5 +1328,11 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
+    }
+
+    private enum class RecordingMode(val label: String) {
+        Frontend("Frontend Recording"),
+        PowerAuto("Power Auto Background"),
+        VolumeDoublePress("Volume Up Double-Press")
     }
 }
