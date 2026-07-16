@@ -20,6 +20,7 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -47,6 +48,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.dashcam.data.DashcamDatabase
+import com.example.dashcam.data.UploadStatus
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
@@ -80,12 +82,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var volumeKeyButton: Button
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
-    private lateinit var adapter: ArrayAdapter<String>
+    private lateinit var adapter: ArrayAdapter<VideoEntity>
     private var videos: List<VideoEntity> = emptyList()
     private val recordedOrientationCache = mutableMapOf<String, String>()
     private var showingVideoManager = false
     private var showingVideoList = false
     private var returnToVideoListAfterManager = false
+    private var restoreVideoListScroll = false
+    private var videoListFirstVisiblePosition = 0
+    private var videoListTopOffset = 0
     private var exitVideoFullscreen: (() -> Boolean)? = null
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -198,8 +203,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (::previewView.isInitialized) updatePreviewAvailability()
-        updateModeButtons()
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, backgroundStateReceiver, IntentFilter(BackgroundRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -211,8 +214,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        updateModeButtons()
-        updatePreviewAvailability()
+        if (!showingVideoList && !showingVideoManager) {
+            refreshHomeStatus()
+        } else {
+            updateModeButtons()
+            updatePreviewAvailability()
+        }
     }
 
     override fun onStop() {
@@ -339,8 +346,7 @@ class MainActivity : ComponentActivity() {
         root.addView(secondaryControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         scroll.addView(root)
         setContentView(scroll)
-        updateModeButtons()
-        updateRecordingStatus()
+        refreshHomeStatus()
     }
 
     private fun showLocalVideos() {
@@ -366,11 +372,12 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 0, 0, dp(10))
         })
 
-        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
+        adapter = createVideoListAdapter()
         videoList = ListView(this).apply {
             adapter = this@MainActivity.adapter
             dividerHeight = 1
             setOnItemClickListener { _, _, position, _ ->
+                rememberVideoListScroll()
                 returnToVideoListAfterManager = true
                 showVideoManager(videos[position])
             }
@@ -381,7 +388,7 @@ class MainActivity : ComponentActivity() {
                 true
             }
         }
-        adapter.addAll(videos.map(::formatVideo))
+        adapter.addAll(videos)
         root.addView(videoList, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(actionButton("Set All Playback Rotation") {
             showSetAllPlaybackRotationDialog()
@@ -403,6 +410,37 @@ class MainActivity : ComponentActivity() {
         }, weighted().apply { marginStart = dp(8) })
         root.addView(controls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         setContentView(root)
+        restoreVideoListScrollIfNeeded()
+    }
+
+    private fun createVideoListAdapter() =
+        object : ArrayAdapter<VideoEntity>(this, android.R.layout.simple_list_item_1, mutableListOf()) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent) as TextView
+                val video = getItem(position) ?: return view
+                view.text = formatVideo(video)
+                view.textSize = 14f
+                view.setTextColor(Color.rgb(17, 24, 39))
+                view.setPadding(dp(12), dp(10), dp(12), dp(10))
+                view.setBackgroundColor(uploadStatusBackground(video.uploadStatus))
+                return view
+            }
+        }
+
+    private fun rememberVideoListScroll() {
+        if (!::videoList.isInitialized) return
+        videoListFirstVisiblePosition = videoList.firstVisiblePosition
+        videoListTopOffset = videoList.getChildAt(0)?.top ?: 0
+        restoreVideoListScroll = true
+    }
+
+    private fun restoreVideoListScrollIfNeeded() {
+        if (!restoreVideoListScroll) return
+        restoreVideoListScroll = false
+        videoList.post {
+            val position = videoListFirstVisiblePosition.coerceIn(0, videos.lastIndex.coerceAtLeast(0))
+            videoList.setSelectionFromTop(position, videoListTopOffset)
+        }
     }
 
     private fun showVideoManager(video: VideoEntity) {
@@ -1105,7 +1143,7 @@ class MainActivity : ComponentActivity() {
                 videos = items
                 if (::adapter.isInitialized && showingVideoList) {
                     adapter.clear()
-                    adapter.addAll(items.map(::formatVideo))
+                    adapter.addAll(items)
                 }
                 if (::storageStatus.isInitialized) {
                     updateStorageStatus()
@@ -1154,6 +1192,28 @@ class MainActivity : ComponentActivity() {
         updateRecordingStatus(active)
     }
 
+    private fun refreshHomeStatus() {
+        if (!::recordingStatus.isInitialized) return
+        backgroundRecordingActive = PowerRecordingSettings.isBackgroundRecordingActive(this)
+        if (!backgroundRecordingActive) {
+            backgroundElapsedSeconds = 0
+            backgroundFilename = null
+        }
+        updateStorageStatus()
+        renderCharging(currentBatteryIntent())
+        updateRecordingStatus()
+        if (::previewView.isInitialized) updatePreviewAvailability()
+        queryBackgroundRecordingState()
+        if (::serverStatus.isInitialized && ::serverUrl.isInitialized) checkServer()
+    }
+
+    private fun queryBackgroundRecordingState() {
+        startService(
+            Intent(this, BackgroundRecordingService::class.java)
+                .setAction(BackgroundRecordingService.ACTION_QUERY_STATE)
+        )
+    }
+
     private fun updateRecordingStatus(activeOverride: Boolean? = null) {
         if (!::recordingStatus.isInitialized) return
         val active = activeOverride ?: (recording != null || continueRecording)
@@ -1185,11 +1245,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderCharging(intent: Intent?) {
+        if (!::chargingStatus.isInitialized) return
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         chargingStatus.text = "Power: ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
     }
+    private fun currentBatteryIntent(): Intent? =
+        registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
     private fun isCharging(): Boolean {
-        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val intent = currentBatteryIntent()
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
     }
@@ -1200,6 +1264,14 @@ class MainActivity : ComponentActivity() {
         val error = video.errorMessage?.let { "\n$it" }.orEmpty()
         return "$date  ${video.filename}\n${recordingSource(video)} - ${formatDurationSeconds(video.durationSeconds)} - ${formatBytes(video.fileSizeBytes)} - Recorded ${recordedOrientation(video)} - Playback ${effectivePlaybackRotation(video)}° - ${video.uploadStatus} - $lock$error"
     }
+
+    private fun uploadStatusBackground(status: UploadStatus): Int =
+        when (status) {
+            UploadStatus.Pending -> Color.rgb(254, 243, 199)
+            UploadStatus.Uploading -> Color.rgb(219, 234, 254)
+            UploadStatus.Uploaded -> Color.rgb(220, 252, 231)
+            UploadStatus.Failed -> Color.rgb(254, 226, 226)
+        }
 
     private fun recordedOrientation(video: VideoEntity): String =
         recordedOrientationCache.getOrPut(video.localPath) {
