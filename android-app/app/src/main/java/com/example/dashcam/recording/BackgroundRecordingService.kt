@@ -271,10 +271,19 @@ class BackgroundRecordingService : Service() {
                     )
                 )
                 UploadWorker.enqueueNow(this@BackgroundRecordingService)
+                mainHandler.post { continueAfterSegment(restart) }
             }
+        } else {
+            continueAfterSegment(restart)
         }
+    }
 
-        if (restart && continueRecording && !stopAfterCurrentSegmentRequested) startSegment() else finishService()
+    private fun continueAfterSegment(restart: Boolean) {
+        if (restart && continueRecording && !stopAfterCurrentSegmentRequested) {
+            startSegment()
+        } else {
+            finishService()
+        }
     }
 
     private fun stopRecording() {
