@@ -386,9 +386,14 @@ class BackgroundRecordingService : Service() {
                     )
                 )
                 UploadWorker.enqueueNow(this@BackgroundRecordingService)
+                mainHandler.post { continueAfterSegment(restart) }
             }
+        } else {
+            continueAfterSegment(restart)
         }
+    }
 
+    private fun continueAfterSegment(restart: Boolean) {
         if (restart && continueRecording && !stopAfterCurrentSegmentRequested) {
             if (legacyCamera != null) startLegacySegment() else startSegment()
         } else {
