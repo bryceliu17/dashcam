@@ -599,13 +599,13 @@ static object ToResponse(Video video) => new
     video.Id,
     video.Filename,
     video.OriginalFilename,
-    video.StartTime,
-    video.EndTime,
+    StartTime = AsUtc(video.StartTime),
+    EndTime = AsUtc(video.EndTime),
     video.DurationSeconds,
     video.FileSizeBytes,
     video.Locked,
     video.PlaybackRotationDegrees,
-    video.UploadedAt,
+    UploadedAt = AsUtc(video.UploadedAt),
     streamUrl = $"/api/videos/{video.Id}/stream"
 };
 
@@ -614,13 +614,20 @@ static object ToAudioResponse(AudioRecording audio) => new
     audio.Id,
     audio.Filename,
     audio.OriginalFilename,
-    audio.StartTime,
-    audio.EndTime,
+    StartTime = AsUtc(audio.StartTime),
+    EndTime = AsUtc(audio.EndTime),
     audio.DurationSeconds,
     audio.FileSizeBytes,
     audio.Locked,
-    audio.UploadedAt,
+    UploadedAt = AsUtc(audio.UploadedAt),
     streamUrl = $"/api/audio/{audio.Id}/stream"
+};
+
+static DateTime AsUtc(DateTime value) => value.Kind switch
+{
+    DateTimeKind.Utc => value,
+    DateTimeKind.Local => value.ToUniversalTime(),
+    _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
 };
 
 public sealed record LockRequest(bool Locked);
