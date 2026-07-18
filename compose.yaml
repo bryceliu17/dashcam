@@ -15,7 +15,7 @@ services:
       MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-200}
       MaxAudioStorageGB: ${DASHCAM_MAX_AUDIO_STORAGE_GB:-50}
     volumes:
-      - "${DASHCAM_DATA_PATH:-D:/DashcamData}:/data"
+      - "E:/DashcamData:/data"
 
   web:
     build:
