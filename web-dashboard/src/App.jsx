@@ -258,6 +258,9 @@ export default function App() {
   const [error, setError] = useState('')
   const [date, setDate] = useState('')
   const [lockFilter, setLockFilter] = useState('all')
+  const [selectedVideoIds, setSelectedVideoIds] = useState(() => new Set())
+  const [selectedAudioIds, setSelectedAudioIds] = useState(() => new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -272,6 +275,8 @@ export default function App() {
       setOnline(health.status === 'ok')
       setVideos(list.items)
       setAudio(audioList.items)
+      setSelectedVideoIds(current => new Set([...current].filter(id => list.items.some(item => item.id === id))))
+      setSelectedAudioIds(current => new Set([...current].filter(id => audioList.items.some(item => item.id === id))))
       setStorage(status)
     } catch (err) {
       setOnline(false)
@@ -340,6 +345,76 @@ export default function App() {
     } catch (err) { setError(err.message) }
   }
 
+  const toggleSelection = (setIds, id) => setIds(current => {
+    const next = new Set(current)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
+  const toggleAll = (items, selectedIds, setIds) => setIds(current => {
+    const next = new Set(current)
+    const allSelected = items.length > 0 && items.every(item => selectedIds.has(item.id))
+    items.forEach(item => allSelected ? next.delete(item.id) : next.add(item.id))
+    return next
+  })
+
+  const bulkLock = async (type, locked) => {
+    const ids = [...(type === 'video' ? selectedVideoIds : selectedAudioIds)]
+    if (!ids.length) return
+    setBulkBusy(true)
+    setError('')
+    try {
+      const result = await api(`/api/${type === 'video' ? 'videos' : 'audio'}/bulk/lock`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, locked }),
+      })
+      const updates = new Map(result.items.map(item => [item.id, item]))
+      if (type === 'video') {
+        setVideos(items => items.map(item => updates.get(item.id) || item))
+        setSelected(current => current && (updates.get(current.id) || current))
+        setSelectedVideoIds(new Set())
+      } else {
+        setAudio(items => items.map(item => updates.get(item.id) || item))
+        setSelectedAudio(current => current && (updates.get(current.id) || current))
+        setSelectedAudioIds(new Set())
+      }
+      await refresh()
+      if (result.notFoundIds.length) setError(`${result.notFoundIds.length} selected item(s) no longer exist.`)
+    } catch (err) { setError(err.message) }
+    finally { setBulkBusy(false) }
+  }
+
+  const bulkRemove = async (type) => {
+    const selectedIds = type === 'video' ? selectedVideoIds : selectedAudioIds
+    const ids = [...selectedIds]
+    if (!ids.length || !window.confirm(`Permanently delete ${ids.length} selected ${type === 'video' ? 'video' : 'audio'} recording(s)?`)) return
+    setBulkBusy(true)
+    setError('')
+    try {
+      const result = await api(`/api/${type === 'video' ? 'videos' : 'audio'}/bulk`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      })
+      const removed = new Set([...result.deletedIds, ...result.notFoundIds])
+      if (type === 'video') {
+        if (selected && removed.has(selected.id)) setSelected(null)
+        setSelectedVideoIds(new Set(result.failedIds))
+      } else {
+        if (selectedAudio && removed.has(selectedAudio.id)) setSelectedAudio(null)
+        setSelectedAudioIds(new Set(result.failedIds))
+      }
+      await refresh()
+      if (result.failedIds.length) setError(`${result.failedIds.length} file(s) could not be deleted and were kept.`)
+    } catch (err) { setError(err.message) }
+    finally { setBulkBusy(false) }
+  }
+
+  const selectedIds = archiveType === 'video' ? selectedVideoIds : selectedAudioIds
+  const setSelectedIds = archiveType === 'video' ? setSelectedVideoIds : setSelectedAudioIds
+  const visibleItems = archiveType === 'video' ? videos : audio
+  const allVisibleSelected = visibleItems.length > 0 && visibleItems.every(item => selectedIds.has(item.id))
+
   return <div className="shell">
     <header>
       <div className="brand"><span className="brand-mark">DC</span><div><strong>Dashcam Archive</strong><small>Local video and audio library</small></div></div>
@@ -375,8 +450,17 @@ export default function App() {
           </select>
         </div></div>
 
-        {archiveType === 'video' ? <div className="table-wrap"><table><thead><tr><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Rotation</th><th>Status</th><th>Actions</th></tr></thead>
+        {selectedIds.size > 0 && <div className="bulk-toolbar" role="toolbar" aria-label="Bulk actions">
+          <strong>{selectedIds.size} selected</strong>
+          <button onClick={() => bulkLock(archiveType, true)} disabled={bulkBusy}><Icon name="lock" />Lock</button>
+          <button onClick={() => bulkLock(archiveType, false)} disabled={bulkBusy}><Icon name="unlock" />Unlock</button>
+          <button className="danger" onClick={() => bulkRemove(archiveType)} disabled={bulkBusy}><Icon name="trash" />Delete</button>
+          <button className="clear-selection" onClick={() => setSelectedIds(new Set())} disabled={bulkBusy}>Clear</button>
+        </div>}
+
+        {archiveType === 'video' ? <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(videos, selectedVideoIds, setSelectedVideoIds)} aria-label="Select all visible videos" /></th><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Rotation</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>{videos.map(video => <tr key={video.id}>
+            <td className="select-cell"><input type="checkbox" checked={selectedVideoIds.has(video.id)} onChange={() => toggleSelection(setSelectedVideoIds, video.id)} aria-label={`Select ${video.originalFilename || video.filename}`} /></td>
             <td>{formatDate(video.startTime)}</td>
             <td className="file"><span>{video.originalFilename || video.filename}</span><small>#{video.id}</small></td>
             <td>{formatDuration(video.durationSeconds)}</td><td>{formatBytes(video.fileSizeBytes)}</td>
@@ -391,8 +475,9 @@ export default function App() {
           </tr>)}</tbody></table>
           {!loading && videos.length === 0 && <div className="empty"><span>00:00</span><h3>No videos yet</h3><p>Videos will appear here after the phone completes its first upload.</p></div>}
           {loading && <div className="empty"><div className="spinner" /><p>Loading video library...</p></div>}
-        </div> : <div className="table-wrap"><table><thead><tr><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
+        </div> : <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(audio, selectedAudioIds, setSelectedAudioIds)} aria-label="Select all visible audio recordings" /></th><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>{audio.map(recording => <tr key={recording.id}>
+            <td className="select-cell"><input type="checkbox" checked={selectedAudioIds.has(recording.id)} onChange={() => toggleSelection(setSelectedAudioIds, recording.id)} aria-label={`Select ${recording.originalFilename || recording.filename}`} /></td>
             <td>{formatDate(recording.startTime)}</td>
             <td className="file"><span>{recording.originalFilename || recording.filename}</span><small>#{recording.id}</small></td>
             <td>{formatDuration(recording.durationSeconds)}</td><td>{formatBytes(recording.fileSizeBytes)}</td>

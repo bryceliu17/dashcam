@@ -4,6 +4,7 @@ using System.Text.Json;
 using Dashcam.Api.Data;
 using Dashcam.Api.Models;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -307,6 +308,51 @@ app.MapPatch("/api/audio/{id:int}/lock", async (
     return Results.Ok(ToAudioResponse(audio));
 });
 
+app.MapPatch("/api/audio/bulk/lock", async (
+    BulkLockRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var ids = NormalizeBulkIds(request.Ids);
+    if (ids is null) return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive IDs." });
+    var recordings = await db.AudioRecordings.Where(x => ids.Contains(x.Id)).ToListAsync(token);
+    foreach (var recording in recordings) recording.Locked = request.Locked;
+    await db.SaveChangesAsync(token);
+    var foundIds = recordings.Select(x => x.Id).ToHashSet();
+    return Results.Ok(new
+    {
+        items = recordings.Select(ToAudioResponse).ToList(),
+        notFoundIds = ids.Where(id => !foundIds.Contains(id)).ToList()
+    });
+});
+
+app.MapDelete("/api/audio/bulk", async (
+    [FromBody] BulkIdsRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var ids = NormalizeBulkIds(request.Ids);
+    if (ids is null) return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive IDs." });
+    var recordings = await db.AudioRecordings.Where(x => ids.Contains(x.Id)).ToListAsync(token);
+    var deletedIds = new List<int>();
+    var failedIds = new List<int>();
+    foreach (var recording in recordings)
+    {
+        if (!TryDelete(recording.FilePath))
+        {
+            failedIds.Add(recording.Id);
+            continue;
+        }
+        TryDeleteWaveformCaches(recording.FilePath);
+        db.AudioRecordings.Remove(recording);
+        deletedIds.Add(recording.Id);
+    }
+    await db.SaveChangesAsync(token);
+    var foundIds = recordings.Select(x => x.Id).ToHashSet();
+    return Results.Ok(new
+    {
+        deletedIds,
+        failedIds,
+        notFoundIds = ids.Where(id => !foundIds.Contains(id)).ToList()
+    });
+});
+
 app.MapGet("/api/videos/{id:int}/stream", async (int id, DashcamDbContext db, CancellationToken token) =>
 {
     var video = await db.Videos.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
@@ -342,6 +388,50 @@ app.MapPatch("/api/videos/{id:int}/lock", async (
     video.Locked = request.Locked;
     await db.SaveChangesAsync(token);
     return Results.Ok(ToResponse(video));
+});
+
+app.MapPatch("/api/videos/bulk/lock", async (
+    BulkLockRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var ids = NormalizeBulkIds(request.Ids);
+    if (ids is null) return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive IDs." });
+    var videos = await db.Videos.Where(x => ids.Contains(x.Id)).ToListAsync(token);
+    foreach (var video in videos) video.Locked = request.Locked;
+    await db.SaveChangesAsync(token);
+    var foundIds = videos.Select(x => x.Id).ToHashSet();
+    return Results.Ok(new
+    {
+        items = videos.Select(ToResponse).ToList(),
+        notFoundIds = ids.Where(id => !foundIds.Contains(id)).ToList()
+    });
+});
+
+app.MapDelete("/api/videos/bulk", async (
+    [FromBody] BulkIdsRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var ids = NormalizeBulkIds(request.Ids);
+    if (ids is null) return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive IDs." });
+    var videos = await db.Videos.Where(x => ids.Contains(x.Id)).ToListAsync(token);
+    var deletedIds = new List<int>();
+    var failedIds = new List<int>();
+    foreach (var video in videos)
+    {
+        if (!TryDelete(video.FilePath))
+        {
+            failedIds.Add(video.Id);
+            continue;
+        }
+        db.Videos.Remove(video);
+        deletedIds.Add(video.Id);
+    }
+    await db.SaveChangesAsync(token);
+    var foundIds = videos.Select(x => x.Id).ToHashSet();
+    return Results.Ok(new
+    {
+        deletedIds,
+        failedIds,
+        notFoundIds = ids.Where(id => !foundIds.Contains(id)).ToList()
+    });
 });
 
 app.MapPatch("/api/videos/{id:int}/rotation", async (
@@ -630,5 +720,15 @@ static DateTime AsUtc(DateTime value) => value.Kind switch
     _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
 };
 
+static List<int>? NormalizeBulkIds(IEnumerable<int>? requestedIds)
+{
+    if (requestedIds is null) return null;
+    var requested = requestedIds.ToList();
+    if (requested.Count is < 1 or > 200 || requested.Any(id => id <= 0)) return null;
+    return requested.Distinct().ToList();
+}
+
 public sealed record LockRequest(bool Locked);
+public sealed record BulkIdsRequest(int[] Ids);
+public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
