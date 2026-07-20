@@ -539,7 +539,7 @@ class BackgroundRecordingService : Service() {
         const val EXTRA_MESSAGE = "message"
         private const val CHANNEL_ID = "dashcam_background_recording"
         private const val NOTIFICATION_ID = 2001
-        private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
+        private const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
         private const val TAG = "BackgroundRecordingService"
     }
 

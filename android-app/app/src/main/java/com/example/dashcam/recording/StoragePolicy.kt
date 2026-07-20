@@ -29,7 +29,7 @@ object StoragePolicy {
         }
 
         return StoragePreparation(
-            canRecord = !videoLimitReached || deletedCount == 1,
+            canRecord = !cleanupRequired || deletedCount == 1,
             deletedCount = deletedCount
         )
     }

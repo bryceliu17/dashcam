@@ -17,7 +17,7 @@ The phone remains the source of truth until an upload succeeds. An offline serve
 
 ```text
 Android phone
-  MP4 video segments (up to 3 minutes)
+  MP4 video segments (up to 5 minutes)
   M4A audio segments (up to 30 minutes)
   Room database: Pending / Uploading / Uploaded / Failed
   WorkManager: validated Wi-Fi, health check, retry queue
@@ -50,7 +50,7 @@ Both branches contain the same server, dashboard, video, audio, upload, and mana
 
 - Foreground recording with a live, aspect-correct preview.
 - Manual background recording through a foreground service.
-- Automatic MP4 segmentation every 3 minutes; the next segment starts immediately.
+- Automatic MP4 segmentation every 5 minutes; the next segment starts immediately.
 - Recording timer, manual-session start time, generated segment count, and overwritten count.
 - Screen-off background recording with a partial wake lock, subject to the phone manufacturer's camera and battery restrictions.
 - Local video list with upload status, playback, seeking, playback rotation, locking, and deletion.
@@ -287,7 +287,7 @@ Upload forms include `file`, `filename`, `startTime`, `endTime`, `durationSecond
 
 ```text
 Android 手机
-  MP4 视频分段（每段最长 3 分钟）
+  MP4 视频分段（每段最长 5 分钟）
   M4A 音频分段（每段最长 30 分钟）
   Room 数据库：Pending / Uploading / Uploaded / Failed
   WorkManager：有效 Wi-Fi、健康检查、失败重试
@@ -320,7 +320,7 @@ React 管理页面（Docker 默认端口 8080）
 
 - 主界面前台录制，并显示比例正确的实时预览。
 - 使用前台服务手动进行后台录制。
-- 每 3 分钟自动保存一个 MP4，并立即开始下一段。
+- 每 5 分钟自动保存一个 MP4，并立即开始下一段。
 - 显示当前计时、本次手动启动时间、生成分段数量和覆盖数量。
 - 使用部分唤醒锁支持熄屏后台录制，但仍受不同手机厂商的相机和省电策略限制。
 - 本地视频列表支持上传状态、播放、进度拖动、播放旋转、锁定和删除。
