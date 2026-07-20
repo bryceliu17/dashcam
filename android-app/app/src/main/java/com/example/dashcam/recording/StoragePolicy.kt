@@ -5,7 +5,7 @@ import com.example.dashcam.data.DashcamDatabase
 import java.io.File
 
 object StoragePolicy {
-    const val MAX_VIDEO_BYTES = 15L * 1024 * 1024 * 1024
+    const val MAX_VIDEO_BYTES = 25L * 1024 * 1024 * 1024
     private const val MIN_FREE_BYTES = 1L * 1024 * 1024 * 1024
 
     suspend fun prepareForRecording(context: Context, videoDirectory: File): Boolean {
@@ -29,7 +29,7 @@ object StoragePolicy {
         }
 
         return StoragePreparation(
-            canRecord = !videoLimitReached || deletedCount == 1,
+            canRecord = !cleanupRequired || deletedCount == 1,
             deletedCount = deletedCount
         )
     }

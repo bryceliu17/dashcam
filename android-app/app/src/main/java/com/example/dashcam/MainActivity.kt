@@ -489,7 +489,7 @@ class MainActivity : ComponentActivity() {
             ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -1, 1f))
         videoTitleRow.addView(TextView(this).apply {
-            text = "Max per video: 3 min"
+            text = "Max per video: 5 min"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
             setSingleLine(true)
@@ -1953,7 +1953,7 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
+        private const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
     }
 
     private enum class RecordingMode(val label: String) {
