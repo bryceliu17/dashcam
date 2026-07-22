@@ -162,7 +162,14 @@ function WaveformAudio({ recording }) {
   const [waveformError, setWaveformError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(recording.durationSeconds || 0)
-  const [canvasWidth, setCanvasWidth] = useState(0)
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
+  const waveformReferencePeak = useMemo(() => {
+    const visiblePeaks = peaks
+      .map(peak => Math.abs(Number(peak)))
+      .filter(Number.isFinite)
+      .sort((left, right) => left - right)
+    return visiblePeaks[Math.floor((visiblePeaks.length - 1) * 0.95)] || 1
+  }, [peaks])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -193,7 +200,9 @@ function WaveformAudio({ recording }) {
       const ratio = window.devicePixelRatio || 1
       canvas.width = Math.floor(width * ratio)
       canvas.height = Math.floor(height * ratio)
-      setCanvasWidth(width)
+      setCanvasSize(previous => previous.width === width && previous.height === height
+        ? previous
+        : { width, height })
     }
     const observer = new ResizeObserver(resize)
     observer.observe(canvas)
@@ -212,13 +221,16 @@ function WaveformAudio({ recording }) {
     context.clearRect(0, 0, width, height)
     if (!peaks.length) return
     const barWidth = Math.max(1, width / peaks.length * 0.65)
+    context.fillStyle = '#26313a'
+    context.fillRect(0, Math.floor(center), width, Math.max(1, window.devicePixelRatio || 1))
     peaks.forEach((peak, index) => {
       const x = index / peaks.length * width
-      const amplitude = Math.max(1, peak * height * 0.46)
-      context.fillStyle = index / peaks.length <= progress ? '#a9ff5c' : '#46515c'
+      const normalizedPeak = Math.min(1, Math.abs(Number(peak) || 0) / waveformReferencePeak)
+      const amplitude = Math.max(1, normalizedPeak * height * 0.44)
+      context.fillStyle = index / peaks.length <= progress ? '#a9ff5c' : '#62717e'
       context.fillRect(x, center - amplitude, barWidth, amplitude * 2)
     })
-  }, [peaks, currentTime, duration, canvasWidth])
+  }, [peaks, currentTime, duration, canvasSize, waveformReferencePeak])
 
   const seekWaveform = event => {
     const audio = audioRef.current
@@ -260,6 +272,7 @@ export default function App() {
   const [lockFilter, setLockFilter] = useState('all')
   const [selectedVideoIds, setSelectedVideoIds] = useState(() => new Set())
   const [selectedAudioIds, setSelectedAudioIds] = useState(() => new Set())
+  const [bulkRotation, setBulkRotation] = useState(90)
   const [bulkBusy, setBulkBusy] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -385,6 +398,26 @@ export default function App() {
     finally { setBulkBusy(false) }
   }
 
+  const bulkRotate = async () => {
+    const ids = [...selectedVideoIds]
+    if (!ids.length) return
+    setBulkBusy(true)
+    setError('')
+    try {
+      const result = await api('/api/videos/bulk/rotation', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, playbackRotationDegrees: bulkRotation }),
+      })
+      const updates = new Map(result.items.map(item => [item.id, item]))
+      setVideos(items => items.map(item => updates.get(item.id) || item))
+      setSelected(current => current && (updates.get(current.id) || current))
+      setSelectedVideoIds(new Set())
+      await refresh()
+      if (result.notFoundIds.length) setError(`${result.notFoundIds.length} selected video(s) no longer exist.`)
+    } catch (err) { setError(err.message) }
+    finally { setBulkBusy(false) }
+  }
+
   const bulkRemove = async (type) => {
     const selectedIds = type === 'video' ? selectedVideoIds : selectedAudioIds
     const ids = [...selectedIds]
@@ -452,6 +485,12 @@ export default function App() {
 
         {selectedIds.size > 0 && <div className="bulk-toolbar" role="toolbar" aria-label="Bulk actions">
           <strong>{selectedIds.size} selected</strong>
+          {archiveType === 'video' && <>
+            <select className="bulk-rotation-select" value={bulkRotation} onChange={event => setBulkRotation(Number(event.target.value))} disabled={bulkBusy} aria-label="Playback rotation">
+              <option value={0}>0 deg</option><option value={90}>90 deg</option><option value={180}>180 deg</option><option value={270}>270 deg</option>
+            </select>
+            <button onClick={bulkRotate} disabled={bulkBusy}><Icon name="rotate" />Set rotation</button>
+          </>}
           <button onClick={() => bulkLock(archiveType, true)} disabled={bulkBusy}><Icon name="lock" />Lock</button>
           <button onClick={() => bulkLock(archiveType, false)} disabled={bulkBusy}><Icon name="unlock" />Unlock</button>
           <button className="danger" onClick={() => bulkRemove(archiveType)} disabled={bulkBusy}><Icon name="trash" />Delete</button>

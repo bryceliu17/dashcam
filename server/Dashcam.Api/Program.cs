@@ -406,6 +406,24 @@ app.MapPatch("/api/videos/bulk/lock", async (
     });
 });
 
+app.MapPatch("/api/videos/bulk/rotation", async (
+    BulkRotationRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var ids = NormalizeBulkIds(request.Ids);
+    if (ids is null) return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive IDs." });
+    if (!IsValidRotation(request.PlaybackRotationDegrees))
+        return Results.BadRequest(new { error = "playbackRotationDegrees must be 0, 90, 180 or 270." });
+    var videos = await db.Videos.Where(x => ids.Contains(x.Id)).ToListAsync(token);
+    foreach (var video in videos) video.PlaybackRotationDegrees = request.PlaybackRotationDegrees;
+    await db.SaveChangesAsync(token);
+    var foundIds = videos.Select(x => x.Id).ToHashSet();
+    return Results.Ok(new
+    {
+        items = videos.Select(ToResponse).ToList(),
+        notFoundIds = ids.Where(id => !foundIds.Contains(id)).ToList()
+    });
+});
+
 app.MapDelete("/api/videos/bulk", async (
     [FromBody] BulkIdsRequest request, DashcamDbContext db, CancellationToken token) =>
 {
@@ -731,4 +749,5 @@ static List<int>? NormalizeBulkIds(IEnumerable<int>? requestedIds)
 public sealed record LockRequest(bool Locked);
 public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
+public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
