@@ -279,9 +279,18 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun continueAfterSegment(restart: Boolean) {
-        if (restart && continueRecording && !stopAfterCurrentSegmentRequested) {
+        val powerAutoEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
+        val powerAllowsNextSegment =
+            !powerAutoEnabled || PowerRecordingSettings.isDeviceCharging(this)
+        val stopRequested =
+            stopAfterCurrentSegmentRequested && !powerAutoEnabled
+        if (restart && continueRecording && powerAllowsNextSegment && !stopRequested) {
+            stopAfterCurrentSegmentRequested = false
             startSegment()
         } else {
+            if (powerAutoEnabled && !powerAllowsNextSegment) {
+                Log.i(TAG, "Power unavailable at segment boundary; stopping background recording")
+            }
             finishService()
         }
     }

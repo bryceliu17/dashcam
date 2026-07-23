@@ -8,6 +8,8 @@ import android.content.IntentFilter
 object PowerRecordingSettings {
     private const val PREFS = "dashcam_settings"
     private const val KEY_POWER_AUTO_BACKGROUND = "power_auto_background"
+    private const val KEY_POWER_AUTO_START_SUPPRESSED = "power_auto_start_suppressed"
+    private const val KEY_LAST_KNOWN_CHARGING = "last_known_charging"
     private const val KEY_VOLUME_KEY_START = "volume_key_start"
     private const val KEY_VOLUME_KEY_AUDIO_START = "volume_key_audio_start"
     private const val KEY_FOREGROUND_RECORDING_ACTIVE = "foreground_recording_active"
@@ -21,6 +23,7 @@ object PowerRecordingSettings {
     fun setPowerAutoBackgroundEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().apply {
             putBoolean(KEY_POWER_AUTO_BACKGROUND, enabled)
+            putBoolean(KEY_POWER_AUTO_START_SUPPRESSED, false)
             if (enabled) {
                 putBoolean(KEY_VOLUME_KEY_START, false)
                 putBoolean(KEY_VOLUME_KEY_AUDIO_START, false)
@@ -52,6 +55,26 @@ object PowerRecordingSettings {
                 putBoolean(KEY_VOLUME_KEY_START, false)
             }
         }.apply()
+    }
+
+    fun isPowerAutoStartSuppressed(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_POWER_AUTO_START_SUPPRESSED, false)
+
+    fun setPowerAutoStartSuppressed(context: Context, suppressed: Boolean) {
+        prefs(context).edit().putBoolean(KEY_POWER_AUTO_START_SUPPRESSED, suppressed).apply()
+    }
+
+    fun lastKnownChargingState(context: Context): Boolean? {
+        val preferences = prefs(context)
+        return if (preferences.contains(KEY_LAST_KNOWN_CHARGING)) {
+            preferences.getBoolean(KEY_LAST_KNOWN_CHARGING, false)
+        } else {
+            null
+        }
+    }
+
+    fun setLastKnownChargingState(context: Context, charging: Boolean) {
+        prefs(context).edit().putBoolean(KEY_LAST_KNOWN_CHARGING, charging).apply()
     }
 
     fun isAnyRecordingActive(context: Context): Boolean {

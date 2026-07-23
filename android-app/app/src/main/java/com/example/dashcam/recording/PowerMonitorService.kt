@@ -34,7 +34,7 @@ class PowerMonitorService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (!PowerRecordingSettings.isPowerAutoBackgroundEnabled(this@PowerMonitorService)) return
             when (intent?.action) {
-                Intent.ACTION_POWER_CONNECTED -> handlePowerConnected()
+                Intent.ACTION_POWER_CONNECTED -> handlePowerConnected(newConnection = true)
                 Intent.ACTION_POWER_DISCONNECTED -> handlePowerDisconnected()
             }
         }
@@ -65,9 +65,12 @@ class PowerMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun handlePowerConnected() {
+    private fun handlePowerConnected(newConnection: Boolean) {
         lastChargingState = true
+        PowerRecordingSettings.setLastKnownChargingState(this, true)
         if (!PowerRecordingSettings.isDeviceCharging(this)) return
+        if (newConnection) PowerRecordingSettings.setPowerAutoStartSuppressed(this, false)
+        if (PowerRecordingSettings.isPowerAutoStartSuppressed(this)) return
         if (PowerRecordingSettings.isAnyRecordingActive(this)) return
         try {
             Log.i(TAG, "Power connected while monitoring; starting background recording")
@@ -85,6 +88,8 @@ class PowerMonitorService : Service() {
 
     private fun handlePowerDisconnected() {
         lastChargingState = false
+        PowerRecordingSettings.setLastKnownChargingState(this, false)
+        PowerRecordingSettings.setPowerAutoStartSuppressed(this, false)
         if (PowerRecordingSettings.isDeviceCharging(this)) return
         if (!PowerRecordingSettings.isBackgroundRecordingActive(this)) return
         try {
@@ -100,27 +105,35 @@ class PowerMonitorService : Service() {
     }
 
     private fun startMonitoring() {
-        if (monitoring) return
-        lastChargingState = PowerRecordingSettings.isDeviceCharging(this)
+        if (monitoring) {
+            pollPowerState()
+            return
+        }
+        lastChargingState = PowerRecordingSettings.lastKnownChargingState(this)
         monitoring = true
-        mainHandler.post(batteryPollRunnable)
+        pollPowerState()
+        mainHandler.postDelayed(batteryPollRunnable, POLL_INTERVAL_MS)
         Log.i(TAG, "Power monitor polling started, charging=$lastChargingState")
     }
 
     private fun pollPowerState() {
         val charging = PowerRecordingSettings.isDeviceCharging(this)
         val previous = lastChargingState
-        if (previous == null) {
-            lastChargingState = charging
-            return
-        }
-
-        if (!previous && charging) {
-            Log.i(TAG, "Power connected detected by polling")
-            handlePowerConnected()
-        } else if (previous && !charging) {
+        if (charging) {
+            val newConnection = previous == false
+            if (newConnection) Log.i(TAG, "Power connected detected by polling")
+            if (!isBackgroundRecordingServiceRunning() &&
+                PowerRecordingSettings.isBackgroundRecordingActive(this)
+            ) {
+                Log.w(TAG, "Clearing stale background recording state")
+                PowerRecordingSettings.setBackgroundRecordingActive(this, false)
+            }
+            handlePowerConnected(newConnection)
+        } else if (previous == true) {
             Log.i(TAG, "Power disconnected detected by polling")
             handlePowerDisconnected()
+        } else {
+            PowerRecordingSettings.setLastKnownChargingState(this, false)
         }
         lastChargingState = charging
     }
@@ -165,7 +178,7 @@ class PowerMonitorService : Service() {
         const val ACTION_STOP = "com.example.dashcam.power_monitor.STOP"
         private const val CHANNEL_ID = "dashcam_power_monitor"
         private const val NOTIFICATION_ID = 2002
-        private const val POLL_INTERVAL_MS = 3_000L
+        private const val POLL_INTERVAL_MS = 10_000L
         private const val TAG = "PowerMonitorService"
 
         fun start(context: Context) {

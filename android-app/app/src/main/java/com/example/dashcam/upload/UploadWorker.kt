@@ -3,6 +3,7 @@ package com.example.dashcam.upload
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
@@ -33,7 +34,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         if (!manual && !isAutomaticUploadEnabled(applicationContext)) {
             return Result.success(workDataOf(KEY_MESSAGE to "Automatic upload is disabled"))
         }
-        if (!isWifiConnected()) return failureOrRetry(manual, "Connect to Wi-Fi before uploading")
+        if (!isWifiConnected()) return failureOrDefer(manual, "Connect to Wi-Fi before uploading")
 
         val database = DashcamDatabase.get(applicationContext)
         val dao = database.videoDao()
@@ -50,7 +51,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val defaultPlaybackRotation = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_DEFAULT_PLAYBACK_ROTATION, 0)
         val client = ServerClient(serverUrl)
-        if (!client.health()) return failureOrRetry(manual, "Server is unreachable: $serverUrl")
+        if (!client.health()) return failureOrDefer(manual, "Server is unreachable: $serverUrl")
 
         var failed = false
         var uploadedVideos = 0
@@ -86,7 +87,10 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
         return when {
             failed && manual -> Result.failure(workDataOf(KEY_ERROR to lastError))
-            failed -> Result.retry()
+            failed -> {
+                Log.w(TAG, "Automatic upload deferred: $lastError")
+                Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred: $lastError"))
+            }
             candidates.isEmpty() && audioCandidates.isEmpty() ->
                 Result.success(workDataOf(KEY_MESSAGE to when {
                     audioOnly -> "No pending audio to upload"
@@ -101,15 +105,17 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
     }
 
-    private fun failureOrRetry(manual: Boolean, message: String): Result =
-        if (manual) Result.failure(workDataOf(KEY_ERROR to message)) else Result.retry()
+    private fun failureOrDefer(manual: Boolean, message: String): Result {
+        if (manual) return Result.failure(workDataOf(KEY_ERROR to message))
+        Log.w(TAG, "Automatic upload deferred: $message")
+        return Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred: $message"))
+    }
 
     private fun isWifiConnected(): Boolean {
         val manager = applicationContext.getSystemService(ConnectivityManager::class.java)
         val network = manager.activeNetwork ?: return false
         val capabilities = manager.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
     }
 
     companion object {
@@ -125,6 +131,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         private const val KEY_MANUAL = "manual_upload"
         private const val KEY_AUDIO_ONLY = "audio_only"
         private const val KEY_VIDEO_ONLY = "video_only"
+        private const val TAG = "UploadWorker"
         private val uploadMutex = Mutex()
 
         private val wifiConstraint = Constraints.Builder()

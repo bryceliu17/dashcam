@@ -1199,6 +1199,7 @@ class MainActivity : ComponentActivity() {
             toast("Stop dashcam recording first")
             return
         }
+        PowerRecordingSettings.setPowerAutoStartSuppressed(this, false)
         cameraProvider?.unbindAll()
         ContextCompat.startForegroundService(
             this, Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_START)
@@ -1210,6 +1211,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopBackgroundDashcam() {
+        val suppressUntilPowerCycle =
+            PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) &&
+                PowerRecordingSettings.isDeviceCharging(this)
+        PowerRecordingSettings.setPowerAutoStartSuppressed(this, suppressUntilPowerCycle)
         startService(Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_STOP))
         backgroundRecordingActive = false
         PowerRecordingSettings.setBackgroundRecordingActive(this, false)
