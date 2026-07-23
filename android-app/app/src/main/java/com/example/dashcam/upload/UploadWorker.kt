@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.util.Log
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -29,7 +30,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             if (outcome.success) {
                 Result.success(workDataOf(KEY_MESSAGE to outcome.message))
             } else {
-                Result.retry()
+                Log.w(TAG, "Automatic upload deferred: ${outcome.message}")
+                Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred: ${outcome.message}"))
             }
         }
     }
@@ -44,6 +46,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         const val KEY_ERROR = "upload_error"
         private const val UNIQUE_NOW = "dashcam-upload-now"
         private const val UNIQUE_PERIODIC = "dashcam-upload-periodic"
+        private const val TAG = "UploadWorker"
         private val uploadMutex = Mutex()
 
         private val wifiConstraint = Constraints.Builder()
@@ -184,8 +187,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             }
             val network = manager.activeNetwork ?: return false
             val capabilities = manager.getNetworkCapabilities(network) ?: return false
-            return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
         }
 
         private enum class UploadTarget { All, Audio, Video }
