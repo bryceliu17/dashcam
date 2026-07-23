@@ -4,6 +4,7 @@ import com.example.dashcam.data.AudioEntity
 import com.example.dashcam.data.VideoEntity
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -15,13 +16,16 @@ import java.util.concurrent.TimeUnit
 
 class ServerClient(private val baseUrl: String) {
     private val client = OkHttpClient.Builder()
+        .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(5, TimeUnit.MINUTES)
         .build()
 
     fun health(): Boolean = try {
-        val request = Request.Builder().url("${cleanBase()}/api/health").get().build()
+        val request = Request.Builder().url("${cleanBase()}/api/health")
+            .header("Connection", "close")
+            .get().build()
         client.newCall(request).execute().use { it.isSuccessful }
     } catch (_: Exception) { false }
 
@@ -37,7 +41,9 @@ class ServerClient(private val baseUrl: String) {
             .addFormDataPart("fileSizeBytes", file.length().toString())
             .addFormDataPart("playbackRotationDegrees", playbackRotationDegrees.toString())
             .build()
-        val request = Request.Builder().url("${cleanBase()}/api/videos/upload").post(body).build()
+        val request = Request.Builder().url("${cleanBase()}/api/videos/upload")
+            .header("Connection", "close")
+            .post(body).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
@@ -56,7 +62,9 @@ class ServerClient(private val baseUrl: String) {
             .addFormDataPart("durationSeconds", audio.durationSeconds.toString())
             .addFormDataPart("fileSizeBytes", file.length().toString())
             .build()
-        val request = Request.Builder().url("${cleanBase()}/api/audio/upload").post(body).build()
+        val request = Request.Builder().url("${cleanBase()}/api/audio/upload")
+            .header("Connection", "close")
+            .post(body).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
