@@ -44,7 +44,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         const val DEFAULT_SERVER_URL = "http://192.168.1.50:5000"
         const val KEY_MESSAGE = "upload_message"
         const val KEY_ERROR = "upload_error"
-        private const val UNIQUE_NOW = "dashcam-upload-now"
+        // Use a versioned queue so installations with a stuck legacy KEEP job can recover.
+        private const val UNIQUE_AUTO_NOW = "dashcam-auto-upload-now-v2"
         private const val UNIQUE_PERIODIC = "dashcam-upload-periodic"
         private const val TAG = "UploadWorker"
         private val uploadMutex = Mutex()
@@ -55,9 +56,12 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         fun enqueueNow(context: Context) {
             val request = OneTimeWorkRequestBuilder<UploadWorker>()
                 .setConstraints(wifiConstraint)
-                .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.KEEP, request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_AUTO_NOW,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                request
+            )
         }
 
         suspend fun uploadManually(context: Context): String =
