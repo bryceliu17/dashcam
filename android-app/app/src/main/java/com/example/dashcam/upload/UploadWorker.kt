@@ -124,7 +124,9 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         const val KEY_DEFAULT_PLAYBACK_ROTATION = "default_playback_rotation"
         const val KEY_AUTO_UPLOAD_ENABLED = "auto_upload_enabled"
         const val DEFAULT_SERVER_URL = "http://192.168.1.50:5000"
-        private const val UNIQUE_NOW = "dashcam-upload-now"
+        // Use a versioned queue so installations with a stuck legacy KEEP job can recover.
+        private const val UNIQUE_AUTO_NOW = "dashcam-auto-upload-now-v2"
+        private const val UNIQUE_MANUAL = "dashcam-manual-upload"
         private const val UNIQUE_PERIODIC = "dashcam-upload-periodic"
         const val KEY_MESSAGE = "upload_message"
         const val KEY_ERROR = "upload_error"
@@ -140,9 +142,12 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         fun enqueueNow(context: Context) {
             val request = OneTimeWorkRequestBuilder<UploadWorker>()
                 .setConstraints(wifiConstraint)
-                .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.KEEP, request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_AUTO_NOW,
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                request
+            )
         }
 
         fun enqueueManual(context: Context): java.util.UUID {
@@ -150,7 +155,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .setInputData(workDataOf(KEY_MANUAL to true))
                 .setConstraints(wifiConstraint)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.REPLACE, request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_MANUAL,
+                ExistingWorkPolicy.REPLACE,
+                request
+            )
             return request.id
         }
 
@@ -159,7 +168,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .setInputData(workDataOf(KEY_MANUAL to true, KEY_AUDIO_ONLY to true))
                 .setConstraints(wifiConstraint)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.REPLACE, request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_MANUAL,
+                ExistingWorkPolicy.REPLACE,
+                request
+            )
             return request.id
         }
 
@@ -168,7 +181,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .setInputData(workDataOf(KEY_MANUAL to true, KEY_VIDEO_ONLY to true))
                 .setConstraints(wifiConstraint)
                 .build()
-            WorkManager.getInstance(context).enqueueUniqueWork(UNIQUE_NOW, ExistingWorkPolicy.REPLACE, request)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                UNIQUE_MANUAL,
+                ExistingWorkPolicy.REPLACE,
+                request
+            )
             return request.id
         }
 
