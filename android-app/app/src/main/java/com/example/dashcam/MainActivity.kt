@@ -101,6 +101,7 @@ class MainActivity : ComponentActivity() {
     private var showingVideoManager = false
     private var showingVideoList = false
     private var showingAudioList = false
+    private var audioListLoadGeneration = 0
     private var returnToVideoListAfterManager = false
     private var restoreVideoListScroll = false
     private var videoListFirstVisiblePosition = 0
@@ -548,7 +549,47 @@ class MainActivity : ComponentActivity() {
         showingAudioList = true
         showingVideoList = false
         showingVideoManager = false
-        val audioFiles = loadAudioFiles()
+        val generation = ++audioListLoadGeneration
+        showAudioLoading()
+        val recordsByPath = audioRecords.associateBy { it.localPath }
+        lifecycleScope.launch {
+            val audioFiles = withContext(Dispatchers.IO) { loadAudioFiles(recordsByPath) }
+            if (!showingAudioList || generation != audioListLoadGeneration) return@launch
+            renderLocalAudioList(audioFiles)
+        }
+    }
+
+    private fun showAudioLoading() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            setBackgroundColor(Color.rgb(244, 244, 240))
+        }
+        root.addView(TextView(this).apply {
+            text = "Local Audio"
+            textSize = 24f
+            setTextColor(Color.rgb(17, 24, 39))
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(-1, dp(48)))
+        root.addView(ProgressBar(this), LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            topMargin = dp(24)
+        })
+        root.addView(TextView(this).apply {
+            text = "Loading recordings..."
+            textSize = 14f
+            setTextColor(Color.rgb(75, 85, 99))
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(-1, dp(48)))
+        root.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        root.addView(actionButton("Back") {
+            showingAudioList = false
+            buildUi()
+        }, LinearLayout.LayoutParams(-1, dp(52)))
+        setContentView(root)
+    }
+
+    private fun renderLocalAudioList(audioFiles: List<AudioFileInfo>) {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -663,26 +704,30 @@ class MainActivity : ComponentActivity() {
         setContentView(root)
     }
 
-    private fun loadAudioFiles(): List<AudioFileInfo> {
+    private fun loadAudioFiles(recordsByPath: Map<String, AudioEntity>): List<AudioFileInfo> {
         val directory = audioDirectory()
         return directory.listFiles()
             .orEmpty()
             .filter { it.isFile && it.extension.equals("m4a", ignoreCase = true) }
             .map { file ->
-                val retriever = MediaMetadataRetriever()
-                val durationSeconds = try {
-                    retriever.setDataSource(file.absolutePath)
-                    ((retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L) / 1000L)
-                        .toInt()
-                } catch (_: Exception) {
-                    0
-                } finally {
-                    retriever.release()
-                }
-                val record = audioRecords.firstOrNull { it.localPath == file.absolutePath }
-                AudioFileInfo(file, record?.durationSeconds ?: durationSeconds, record?.startTime ?: audioStartTime(file), record)
+                val record = recordsByPath[file.absolutePath]
+                val durationSeconds = record?.durationSeconds ?: readAudioDuration(file)
+                AudioFileInfo(file, durationSeconds, record?.startTime ?: audioStartTime(file), record)
             }
             .sortedByDescending { it.startedAt }
+    }
+
+    private fun readAudioDuration(file: File): Int {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            ((retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L) / 1000L)
+                .toInt()
+        } catch (_: Exception) {
+            0
+        } finally {
+            retriever.release()
+        }
     }
 
     private fun audioDirectory(): File {
