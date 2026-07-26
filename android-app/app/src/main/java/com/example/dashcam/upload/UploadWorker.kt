@@ -3,6 +3,7 @@ package com.example.dashcam.upload
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.util.Log
 import androidx.work.Constraints
@@ -26,7 +27,9 @@ import java.util.concurrent.TimeUnit
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         uploadMutex.withLock {
-            val outcome = performUpload(applicationContext, manual = false, UploadTarget.All)
+            val outcome = withUploadWifiLock(applicationContext) {
+                performUpload(applicationContext, manual = false, UploadTarget.All)
+            }
             if (outcome.success) {
                 Result.success(workDataOf(KEY_MESSAGE to outcome.message))
             } else {
@@ -76,7 +79,10 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         private suspend fun uploadManually(context: Context, target: UploadTarget): String =
             withContext(Dispatchers.IO) {
                 uploadMutex.withLock {
-                    val outcome = performUpload(context.applicationContext, manual = true, target)
+                    val appContext = context.applicationContext
+                    val outcome = withUploadWifiLock(appContext) {
+                        performUpload(appContext, manual = true, target)
+                    }
                     if (!outcome.success) throw IllegalStateException(outcome.message)
                     outcome.message
                 }
@@ -102,6 +108,25 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             if (enabled) {
                 schedulePeriodic(context)
                 enqueueNow(context)
+            }
+        }
+
+        @Suppress("DEPRECATION")
+        private suspend fun <T> withUploadWifiLock(context: Context, block: suspend () -> T): T {
+            val manager = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val wifiLock = try {
+                manager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$TAG:upload")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Unable to acquire upload Wi-Fi lock", error)
+                null
+            }
+            return try {
+                block()
+            } finally {
+                if (wifiLock?.isHeld == true) wifiLock.release()
             }
         }
 
