@@ -3,6 +3,7 @@ package com.example.dashcam.upload
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -24,7 +25,29 @@ import java.util.concurrent.TimeUnit
 
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        uploadMutex.withLock { runUpload() }
+        uploadMutex.withLock {
+            val wifiLock = acquireWifiLock()
+            try {
+                runUpload()
+            } finally {
+                if (wifiLock?.isHeld == true) wifiLock.release()
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireWifiLock(): WifiManager.WifiLock? {
+        val manager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            ?: return null
+        return try {
+            manager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$TAG:upload").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Unable to acquire upload Wi-Fi lock", error)
+            null
+        }
     }
 
     private suspend fun runUpload(): Result {
