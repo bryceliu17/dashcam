@@ -265,7 +265,9 @@ function LiveViewer({ device, onClose }) {
   const [waiting, setWaiting] = useState(true)
   const [rotation, setRotation] = useState(0)
   const [layout, setLayout] = useState({ width: 0, height: 0 })
+  const [fullscreen, setFullscreen] = useState(false)
   const objectUrlRef = useRef('')
+  const playerRef = useRef(null)
   const stageRef = useRef(null)
   const imageRef = useRef(null)
 
@@ -293,6 +295,21 @@ function LiveViewer({ device, onClose }) {
     updateLayout()
     return () => observer.disconnect()
   }, [updateLayout])
+
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullscreen(document.fullscreenElement === playerRef.current)
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen()
+      else await playerRef.current?.requestFullscreen()
+    } catch {
+      setFullscreen(false)
+    }
+  }
 
   useEffect(() => {
     let active = true
@@ -338,10 +355,19 @@ function LiveViewer({ device, onClose }) {
   }, [device.deviceId])
 
   return <div className="modal" onMouseDown={onClose}>
-    <div className="player live-player" onMouseDown={event => event.stopPropagation()}>
+    <div className="player live-player" ref={playerRef} onMouseDown={event => event.stopPropagation()}>
       <div>
         <strong>{device.deviceName} - Live</strong>
         <span className="player-actions">
+          <button
+            type="button"
+            className="playback-control"
+            onClick={toggleFullscreen}
+            aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          >
+            <Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} />
+          </button>
           <button
             type="button"
             className="rotate-control"
