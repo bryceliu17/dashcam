@@ -8,7 +8,11 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
+import android.graphics.SurfaceTexture
+import android.graphics.YuvImage
 import android.graphics.ImageFormat
+import android.hardware.Camera
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -21,6 +25,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -37,6 +42,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 class LiveAccessService : Service() {
@@ -48,6 +54,8 @@ class LiveAccessService : Service() {
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
+    private var legacyCamera: Camera? = null
+    private var legacySurfaceTexture: SurfaceTexture? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var liveClientUrl = ""
@@ -55,6 +63,7 @@ class LiveAccessService : Service() {
     @Volatile private var cameraStarting = false
     @Volatile private var streaming = false
     private var sensorOrientation = 90
+    private var lastLegacyFrameAt = 0L
 
     private val captureRunnable = object : Runnable {
         override fun run() {
@@ -148,6 +157,10 @@ class LiveAccessService : Service() {
         broadcastState()
         cameraHandler.postDelayed(cameraStart@{
             try {
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    startLegacyStreaming()
+                    return@cameraStart
+                }
                 val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
                 val cameraId = manager.cameraIdList.firstOrNull { id ->
                     manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
@@ -179,6 +192,91 @@ class LiveAccessService : Service() {
                 stopStreaming("Unable to open live camera: ${error.message.orEmpty()}")
             }
         }, cameraReleaseDelayMs())
+    }
+
+    @Suppress("DEPRECATION")
+    private fun startLegacyStreaming() {
+        val camera = Camera.open(findLegacyBackCameraId())
+        legacyCamera = camera
+        val parameters = camera.parameters
+        val size = parameters.supportedPreviewSizes
+            .filter { it.width <= 640 && it.height <= 480 }
+            .maxByOrNull { it.width * it.height }
+            ?: parameters.supportedPreviewSizes.minByOrNull { it.width * it.height }
+            ?: throw IllegalStateException("Camera does not support preview frames")
+        parameters.setPreviewSize(size.width, size.height)
+        parameters.previewFormat = ImageFormat.NV21
+        if (parameters.supportedFocusModes?.contains(Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO) == true) {
+            parameters.focusMode = Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO
+        }
+        parameters.supportedPreviewFpsRange
+            ?.maxByOrNull { it[1] }
+            ?.let { parameters.setPreviewFpsRange(it[0], it[1]) }
+        camera.parameters = parameters
+
+        val texture = SurfaceTexture(0).apply {
+            setDefaultBufferSize(size.width, size.height)
+        }
+        legacySurfaceTexture = texture
+        camera.setPreviewTexture(texture)
+        val bufferSize = size.width * size.height * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8
+        repeat(2) { camera.addCallbackBuffer(ByteArray(bufferSize)) }
+        camera.setPreviewCallbackWithBuffer { data, source ->
+            if (!streaming) {
+                source.addCallbackBuffer(data)
+                return@setPreviewCallbackWithBuffer
+            }
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastLegacyFrameAt < FRAME_INTERVAL_MS ||
+                !frameUploading.compareAndSet(false, true)
+            ) {
+                source.addCallbackBuffer(data)
+                return@setPreviewCallbackWithBuffer
+            }
+            lastLegacyFrameAt = now
+            val frame = data.copyOf()
+            source.addCallbackBuffer(data)
+            scope.launch {
+                try {
+                    val output = ByteArrayOutputStream()
+                    val encoded = YuvImage(
+                        frame,
+                        ImageFormat.NV21,
+                        size.width,
+                        size.height,
+                        null
+                    ).compressToJpeg(Rect(0, 0, size.width, size.height), LEGACY_JPEG_QUALITY, output)
+                    if (encoded && streaming) {
+                        currentClient().uploadLiveFrame(
+                            DeviceStatusReporter.deviceId(this@LiveAccessService),
+                            output.toByteArray()
+                        )
+                    }
+                } catch (error: Exception) {
+                    Log.d(TAG, "Legacy live frame upload deferred: ${error.message.orEmpty()}")
+                } finally {
+                    frameUploading.set(false)
+                }
+            }
+        }
+        camera.startPreview()
+        cameraStarting = false
+        streaming = true
+        LiveAccessSettings.setStreaming(this, true)
+        LiveAccessSettings.setError(this, null)
+        acquireStreamingLocks()
+        updateNotification()
+        broadcastState()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun findLegacyBackCameraId(): Int {
+        val info = Camera.CameraInfo()
+        for (id in 0 until Camera.getNumberOfCameras()) {
+            Camera.getCameraInfo(id, info)
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_BACK) return id
+        }
+        return 0
     }
 
     private val cameraStateCallback = object : CameraDevice.StateCallback() {
@@ -255,6 +353,15 @@ class LiveAccessService : Service() {
         if (::cameraHandler.isInitialized) {
             cameraHandler.removeCallbacks(captureRunnable)
             cameraHandler.post {
+                try {
+                    legacyCamera?.setPreviewCallbackWithBuffer(null)
+                    legacyCamera?.stopPreview()
+                } catch (_: Exception) {
+                }
+                legacyCamera?.release()
+                legacyCamera = null
+                legacySurfaceTexture?.release()
+                legacySurfaceTexture = null
                 captureSession?.close()
                 captureSession = null
                 cameraDevice?.close()
@@ -397,6 +504,7 @@ class LiveAccessService : Service() {
         private const val NOTIFICATION_ID = 2004
         private const val CONTROL_INTERVAL_MS = 2_000L
         private const val FRAME_INTERVAL_MS = 125L
+        private const val LEGACY_JPEG_QUALITY = 60
         private const val CAMERA_RELEASE_DELAY_MS = 300L
         private const val TAG = "LiveAccessService"
 
