@@ -147,6 +147,7 @@ app.MapPost("/api/devices/{deviceId}/live", async (
             return Results.Conflict(new { error = "Phone is recording." });
         device.LiveError = string.Empty;
         liveFrames.TouchViewer(deviceId);
+        liveFrames.SetRequested(deviceId);
     }
     else
     {
@@ -163,7 +164,6 @@ app.MapPost("/api/devices/{deviceId}/live", async (
 app.MapPost("/api/devices/{deviceId}/live/frame", async (
     string deviceId,
     HttpRequest request,
-    DashcamDbContext db,
     LiveFrameStore liveFrames,
     CancellationToken cancellationToken) =>
 {
@@ -173,10 +173,7 @@ app.MapPost("/api/devices/{deviceId}/live/frame", async (
     if (request.ContentLength is null or <= 0 || request.ContentLength > maxFrameBytes)
         return Results.BadRequest(new { error = "A JPEG frame up to 2 MB is required." });
 
-    var device = await db.DeviceStatuses.AsNoTracking()
-        .FirstOrDefaultAsync(item => item.DeviceId == deviceId, cancellationToken);
-    if (device is null) return Results.NotFound(new { error = "Device not found." });
-    if (!device.LiveRequested || !device.LiveAccessEnabled)
+    if (!liveFrames.IsRequested(deviceId))
         return Results.Conflict(new { error = "Live viewing is not requested." });
 
     await using var buffer = new MemoryStream((int)request.ContentLength.Value);
@@ -187,13 +184,23 @@ app.MapPost("/api/devices/{deviceId}/live/frame", async (
     return Results.NoContent();
 });
 
-app.MapGet("/api/devices/{deviceId}/live/frame", (
+app.MapGet("/api/devices/{deviceId}/live/frame", async (
     string deviceId,
-    LiveFrameStore liveFrames) =>
+    long? after,
+    HttpResponse response,
+    LiveFrameStore liveFrames,
+    CancellationToken cancellationToken) =>
 {
+    if (!liveFrames.IsRequested(deviceId))
+        return Results.Conflict(new { error = "Live viewing is not requested." });
     liveFrames.TouchViewer(deviceId);
-    if (!liveFrames.TryGet(deviceId, out var frame))
-        return Results.NotFound(new { error = "No live frame is available." });
+    var frame = await liveFrames.WaitForNewAsync(
+        deviceId,
+        after ?? -1,
+        TimeSpan.FromSeconds(2),
+        cancellationToken);
+    if (frame is null) return Results.NoContent();
+    response.Headers["X-Live-Sequence"] = frame.Sequence.ToString(CultureInfo.InvariantCulture);
     return Results.File(frame.Jpeg, "image/jpeg", lastModified: frame.CapturedAt);
 });
 

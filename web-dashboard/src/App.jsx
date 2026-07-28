@@ -268,13 +268,17 @@ function LiveViewer({ device, onClose }) {
   useEffect(() => {
     let active = true
     let timer
+    let sequence = -1
     const loadFrame = async () => {
+      let retryDelay = 25
       try {
         const response = await fetch(
-          `${API}/api/devices/${encodeURIComponent(device.deviceId)}/live/frame?t=${Date.now()}`,
+          `${API}/api/devices/${encodeURIComponent(device.deviceId)}/live/frame?after=${sequence}`,
           { cache: 'no-store' },
         )
         if (response.ok) {
+          if (response.status === 204) return
+          const nextSequence = Number(response.headers.get('X-Live-Sequence'))
           const nextUrl = URL.createObjectURL(await response.blob())
           if (!active) {
             URL.revokeObjectURL(nextUrl)
@@ -282,15 +286,18 @@ function LiveViewer({ device, onClose }) {
           }
           if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
           objectUrlRef.current = nextUrl
+          if (Number.isFinite(nextSequence)) sequence = nextSequence
           setFrameUrl(nextUrl)
           setWaiting(false)
         } else {
+          retryDelay = 250
           setWaiting(true)
         }
       } catch {
+        retryDelay = 500
         setWaiting(true)
       } finally {
-        if (active) timer = window.setTimeout(loadFrame, 200)
+        if (active) timer = window.setTimeout(loadFrame, retryDelay)
       }
     }
     loadFrame()
