@@ -44,6 +44,12 @@ class ServerClient(private val baseUrl: String) {
         .readTimeout(5, TimeUnit.MINUTES)
         .writeTimeout(5, TimeUnit.MINUTES)
         .build()
+    private val liveClient = OkHttpClient.Builder()
+        .connectionPool(ConnectionPool(2, 5, TimeUnit.MINUTES))
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build()
 
     fun health(): Boolean = try {
         val request = Request.Builder().url("${cleanBase()}/api/health")
@@ -144,10 +150,9 @@ class ServerClient(private val baseUrl: String) {
         val body = jpeg.toRequestBody("image/jpeg".toMediaType())
         val request = Request.Builder()
             .url("${cleanBase()}/api/devices/$deviceId/live/frame")
-            .header("Connection", "close")
             .post(body)
             .build()
-        client.newCall(request).execute().use { response ->
+        liveClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 val text = response.body?.string().orEmpty()
                 throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
