@@ -21,7 +21,6 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import android.view.OrientationEventListener
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -52,11 +51,8 @@ class LiveAccessService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var liveClientUrl = ""
     private var liveClient: ServerClient? = null
-    private lateinit var orientationListener: OrientationEventListener
     @Volatile private var cameraStarting = false
     @Volatile private var streaming = false
-    @Volatile private var deviceOrientation = 0
-    private var sensorOrientation = 90
 
     private val captureRunnable = object : Runnable {
         override fun run() {
@@ -71,7 +67,6 @@ class LiveAccessService : Service() {
             try {
                 val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(reader.surface)
-                    set(CaptureRequest.JPEG_ORIENTATION, jpegOrientationDegrees(sensorOrientation))
                     set(CaptureRequest.JPEG_QUALITY, 65.toByte())
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 }.build()
@@ -89,14 +84,6 @@ class LiveAccessService : Service() {
         createNotificationChannel()
         cameraThread = HandlerThread("dashcam-live-camera").apply { start() }
         cameraHandler = Handler(cameraThread.looper)
-        orientationListener = object : OrientationEventListener(this) {
-            override fun onOrientationChanged(orientation: Int) {
-                if (orientation == ORIENTATION_UNKNOWN) return
-                deviceOrientation = ((orientation + 45) / 90 * 90) % 360
-            }
-        }.also {
-            if (it.canDetectOrientation()) it.enable()
-        }
         LiveAccessSettings.setStreaming(this, false)
         LiveAccessSettings.setError(this, null)
     }
@@ -168,7 +155,6 @@ class LiveAccessService : Service() {
                     return@cameraStart
                 }
                 val characteristics = manager.getCameraCharacteristics(cameraId)
-                sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
                 val sizes = characteristics
                     .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     ?.getOutputSizes(ImageFormat.JPEG)
@@ -296,9 +282,6 @@ class LiveAccessService : Service() {
         }
     }
 
-    private fun jpegOrientationDegrees(cameraSensorOrientation: Int): Int =
-        (cameraSensorOrientation + deviceOrientation + 360) % 360
-
     @Suppress("DEPRECATION")
     private fun acquireStreamingLocks() {
         if (wakeLock?.isHeld != true) {
@@ -376,7 +359,6 @@ class LiveAccessService : Service() {
 
     override fun onDestroy() {
         monitorJob?.cancel()
-        if (::orientationListener.isInitialized) orientationListener.disable()
         stopStreaming()
         if (::cameraThread.isInitialized) cameraThread.quitSafely()
         super.onDestroy()

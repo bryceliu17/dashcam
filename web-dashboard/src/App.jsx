@@ -263,7 +263,36 @@ function WaveformAudio({ recording }) {
 function LiveViewer({ device, onClose }) {
   const [frameUrl, setFrameUrl] = useState('')
   const [waiting, setWaiting] = useState(true)
+  const [rotation, setRotation] = useState(0)
+  const [layout, setLayout] = useState({ width: 0, height: 0 })
   const objectUrlRef = useRef('')
+  const stageRef = useRef(null)
+  const imageRef = useRef(null)
+
+  const updateLayout = useCallback(() => {
+    const stage = stageRef.current
+    const image = imageRef.current
+    if (!stage || !image || !image.naturalWidth || !image.naturalHeight) return
+    const quarterTurn = rotation === 90 || rotation === 270
+    const displayImageWidth = quarterTurn ? image.naturalHeight : image.naturalWidth
+    const displayImageHeight = quarterTurn ? image.naturalWidth : image.naturalHeight
+    const scale = Math.min(stage.clientWidth / displayImageWidth, stage.clientHeight / displayImageHeight)
+    const displayWidth = Math.max(1, Math.floor(displayImageWidth * scale))
+    const displayHeight = Math.max(1, Math.floor(displayImageHeight * scale))
+    setLayout({
+      width: quarterTurn ? displayHeight : displayWidth,
+      height: quarterTurn ? displayWidth : displayHeight,
+    })
+  }, [rotation])
+
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return undefined
+    const observer = new ResizeObserver(updateLayout)
+    observer.observe(stage)
+    updateLayout()
+    return () => observer.disconnect()
+  }, [updateLayout])
 
   useEffect(() => {
     let active = true
@@ -312,13 +341,34 @@ function LiveViewer({ device, onClose }) {
     <div className="player live-player" onMouseDown={event => event.stopPropagation()}>
       <div>
         <strong>{device.deviceName} - Live</strong>
-        <button className="close-player" aria-label="Stop and close live view" title="Stop live view" onClick={onClose}>X</button>
+        <span className="player-actions">
+          <button
+            type="button"
+            className="rotate-control"
+            title="Rotate live view clockwise by 90 degrees"
+            onClick={() => setRotation(current => (current + 90) % 360)}
+          >
+            <Icon name="rotate" />
+            <span>Rotate 90 deg</span>
+          </button>
+          <button className="close-player" aria-label="Stop and close live view" title="Stop live view" onClick={onClose}>X</button>
+        </span>
       </div>
-      <div className="live-stage">
-        {frameUrl && <img src={frameUrl} alt={`Live camera from ${device.deviceName}`} />}
+      <div className="live-stage" ref={stageRef}>
+        {frameUrl && <img
+          ref={imageRef}
+          src={frameUrl}
+          alt={`Live camera from ${device.deviceName}`}
+          onLoad={updateLayout}
+          style={{
+            width: layout.width ? `${layout.width}px` : 0,
+            height: layout.height ? `${layout.height}px` : 0,
+            transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+          }}
+        />}
         {waiting && <div className="live-waiting"><div className="spinner" /><span>Waiting for phone camera...</span></div>}
       </div>
-      <p>{device.liveError || (device.liveStreaming ? 'Live camera connected' : 'Starting live camera')}</p>
+      <p>{device.liveError || (device.liveStreaming ? `Live camera connected - view rotation ${rotation} deg` : 'Starting live camera')}</p>
     </div>
   </div>
 }
