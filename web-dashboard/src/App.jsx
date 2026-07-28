@@ -290,7 +290,7 @@ function LiveViewer({ device, onClose }) {
       } catch {
         setWaiting(true)
       } finally {
-        if (active) timer = window.setTimeout(loadFrame, 400)
+        if (active) timer = window.setTimeout(loadFrame, 200)
       }
     }
     loadFrame()

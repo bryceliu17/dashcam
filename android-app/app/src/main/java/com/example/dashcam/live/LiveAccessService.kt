@@ -49,6 +49,8 @@ class LiveAccessService : Service() {
     private var imageReader: ImageReader? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var liveClientUrl = ""
+    private var liveClient: ServerClient? = null
     @Volatile private var cameraStarting = false
     @Volatile private var streaming = false
     private var sensorOrientation = 90
@@ -67,6 +69,7 @@ class LiveAccessService : Service() {
                 val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(reader.surface)
                     set(CaptureRequest.JPEG_ORIENTATION, sensorOrientation)
+                    set(CaptureRequest.JPEG_QUALITY, 75.toByte())
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 }.build()
                 session.capture(request, null, cameraHandler)
@@ -274,7 +277,12 @@ class LiveAccessService : Service() {
         val serverUrl = getSharedPreferences(UploadWorker.PREFS, Context.MODE_PRIVATE)
             .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
             ?: UploadWorker.DEFAULT_SERVER_URL
-        return ServerClient(serverUrl)
+        val existing = liveClient
+        if (existing != null && liveClientUrl == serverUrl) return existing
+        return ServerClient(serverUrl).also {
+            liveClientUrl = serverUrl
+            liveClient = it
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -369,7 +377,7 @@ class LiveAccessService : Service() {
         private const val CHANNEL_ID = "dashcam_live_access"
         private const val NOTIFICATION_ID = 2004
         private const val CONTROL_INTERVAL_MS = 2_000L
-        private const val FRAME_INTERVAL_MS = 400L
+        private const val FRAME_INTERVAL_MS = 250L
         private const val CAMERA_RELEASE_DELAY_MS = 300L
         private const val TAG = "LiveAccessService"
 
