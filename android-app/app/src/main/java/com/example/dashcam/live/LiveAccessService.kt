@@ -27,6 +27,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.OrientationEventListener
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -60,9 +61,12 @@ class LiveAccessService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var liveClientUrl = ""
     private var liveClient: ServerClient? = null
+    private lateinit var orientationListener: OrientationEventListener
     @Volatile private var cameraStarting = false
     @Volatile private var streaming = false
+    @Volatile private var deviceOrientation = 0
     private var sensorOrientation = 90
+    private var legacySensorOrientation = 90
     private var lastLegacyFrameAt = 0L
 
     private val captureRunnable = object : Runnable {
@@ -96,6 +100,14 @@ class LiveAccessService : Service() {
         createNotificationChannel()
         cameraThread = HandlerThread("dashcam-live-camera").apply { start() }
         cameraHandler = Handler(cameraThread.looper)
+        orientationListener = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                deviceOrientation = ((orientation + 45) / 90 * 90) % 360
+            }
+        }.also {
+            if (it.canDetectOrientation()) it.enable()
+        }
         LiveAccessSettings.setStreaming(this, false)
         LiveAccessSettings.setError(this, null)
     }
@@ -196,7 +208,11 @@ class LiveAccessService : Service() {
 
     @Suppress("DEPRECATION")
     private fun startLegacyStreaming() {
-        val camera = Camera.open(findLegacyBackCameraId())
+        val cameraId = findLegacyBackCameraId()
+        val cameraInfo = Camera.CameraInfo()
+        Camera.getCameraInfo(cameraId, cameraInfo)
+        legacySensorOrientation = cameraInfo.orientation
+        val camera = Camera.open(cameraId)
         legacyCamera = camera
         val parameters = camera.parameters
         val size = parameters.supportedPreviewSizes
@@ -235,17 +251,23 @@ class LiveAccessService : Service() {
             }
             lastLegacyFrameAt = now
             val frame = data.copyOf()
+            val rotation = jpegOrientationDegrees(legacySensorOrientation)
             source.addCallbackBuffer(data)
             scope.launch {
                 try {
+                    val rotated = rotateNv21(frame, size.width, size.height, rotation)
                     val output = ByteArrayOutputStream()
                     val encoded = YuvImage(
-                        frame,
+                        rotated.bytes,
                         ImageFormat.NV21,
-                        size.width,
-                        size.height,
+                        rotated.width,
+                        rotated.height,
                         null
-                    ).compressToJpeg(Rect(0, 0, size.width, size.height), LEGACY_JPEG_QUALITY, output)
+                    ).compressToJpeg(
+                        Rect(0, 0, rotated.width, rotated.height),
+                        LEGACY_JPEG_QUALITY,
+                        output
+                    )
                     if (encoded && streaming) {
                         currentClient().uploadLiveFrame(
                             DeviceStatusReporter.deviceId(this@LiveAccessService),
@@ -393,6 +415,63 @@ class LiveAccessService : Service() {
         }
     }
 
+    private fun jpegOrientationDegrees(cameraSensorOrientation: Int): Int =
+        (cameraSensorOrientation + deviceOrientation + 360) % 360
+
+    private fun rotateNv21(input: ByteArray, width: Int, height: Int, rotation: Int): RotatedNv21 {
+        val normalized = ((rotation % 360) + 360) % 360
+        if (normalized == 0) return RotatedNv21(input, width, height)
+
+        val frameSize = width * height
+        val expectedSize = frameSize * 3 / 2
+        val output = ByteArray(expectedSize)
+        var outputIndex = 0
+
+        when (normalized) {
+            90 -> {
+                for (x in 0 until width) {
+                    for (y in height - 1 downTo 0) {
+                        output[outputIndex++] = input[y * width + x]
+                    }
+                }
+                for (x in 0 until width step 2) {
+                    for (y in height / 2 - 1 downTo 0) {
+                        val inputIndex = frameSize + y * width + x
+                        output[outputIndex++] = input[inputIndex]
+                        output[outputIndex++] = input[inputIndex + 1]
+                    }
+                }
+                return RotatedNv21(output, height, width)
+            }
+            180 -> {
+                for (index in frameSize - 1 downTo 0) {
+                    output[outputIndex++] = input[index]
+                }
+                for (index in expectedSize - 2 downTo frameSize step 2) {
+                    output[outputIndex++] = input[index]
+                    output[outputIndex++] = input[index + 1]
+                }
+                return RotatedNv21(output, width, height)
+            }
+            270 -> {
+                for (x in width - 1 downTo 0) {
+                    for (y in 0 until height) {
+                        output[outputIndex++] = input[y * width + x]
+                    }
+                }
+                for (x in width - 2 downTo 0 step 2) {
+                    for (y in 0 until height / 2) {
+                        val inputIndex = frameSize + y * width + x
+                        output[outputIndex++] = input[inputIndex]
+                        output[outputIndex++] = input[inputIndex + 1]
+                    }
+                }
+                return RotatedNv21(output, height, width)
+            }
+            else -> return RotatedNv21(input, width, height)
+        }
+    }
+
     @Suppress("DEPRECATION")
     private fun acquireStreamingLocks() {
         if (wakeLock?.isHeld != true) {
@@ -488,6 +567,7 @@ class LiveAccessService : Service() {
 
     override fun onDestroy() {
         monitorJob?.cancel()
+        if (::orientationListener.isInitialized) orientationListener.disable()
         stopStreaming()
         if (::cameraThread.isInitialized) cameraThread.quitSafely()
         super.onDestroy()
@@ -521,4 +601,6 @@ class LiveAccessService : Service() {
             )
         }
     }
+
+    private data class RotatedNv21(val bytes: ByteArray, val width: Int, val height: Int)
 }
