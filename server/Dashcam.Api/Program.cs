@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using Dashcam.Api.Data;
 using Dashcam.Api.Models;
+using Dashcam.Api.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,7 @@ builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 
 var connectionString = builder.Configuration.GetConnectionString("DashcamDatabase")
     ?? "Data Source=dashcam.db";
 builder.Services.AddDbContext<DashcamDbContext>(options => options.UseSqlite(connectionString));
+builder.Services.AddSingleton<LiveFrameStore>();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 builder.Services.Configure<FormOptions>(options =>
@@ -27,6 +29,9 @@ await using (var scope = app.Services.CreateAsyncScope())
     await db.Database.EnsureCreatedAsync();
     await EnsurePlaybackRotationColumnAsync(db);
     await EnsureAudioTableAsync(db);
+    await EnsureDeviceStatusTableAsync(db);
+    await db.Database.ExecuteSqlRawAsync(
+        "UPDATE DeviceStatuses SET LiveRequested = 0, LiveStreaming = 0, LiveError = ''");
 }
 
 app.MapGet("/api/health", () => Results.Ok(new
@@ -34,6 +39,163 @@ app.MapGet("/api/health", () => Results.Ok(new
     status = "ok",
     serverTime = DateTime.UtcNow
 }));
+
+app.MapPost("/api/devices/heartbeat", async (
+    DeviceHeartbeatRequest request,
+    DashcamDbContext db,
+    LiveFrameStore liveFrames,
+    CancellationToken cancellationToken) =>
+{
+    var deviceId = CleanRequiredText(request.DeviceId, 128);
+    var deviceName = CleanRequiredText(request.DeviceName, 160);
+    if (deviceId is null || deviceName is null || request.BatteryLevel is < 0 or > 100)
+        return Results.BadRequest(new { error = "deviceId, deviceName and a batteryLevel from 0 to 100 are required." });
+
+    var now = DateTime.UtcNow;
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null)
+    {
+        device = new DeviceStatus
+        {
+            DeviceId = deviceId,
+            DeviceName = deviceName,
+            Manufacturer = CleanOptionalText(request.Manufacturer, 80),
+            Model = CleanOptionalText(request.Model, 120),
+            AndroidVersion = CleanOptionalText(request.AndroidVersion, 80),
+            AppVersion = CleanOptionalText(request.AppVersion, 40),
+            BatteryLevel = request.BatteryLevel,
+            IsCharging = request.IsCharging,
+            ChargingSource = CleanOptionalText(request.ChargingSource, 32),
+            PowerSaveMode = request.PowerSaveMode,
+            VideoRecordingActive = request.VideoRecordingActive,
+            AudioRecordingActive = request.AudioRecordingActive,
+            LiveAccessEnabled = request.LiveAccessEnabled,
+            LiveRequested = false,
+            LiveStreaming = request.LiveStreaming,
+            LiveError = CleanOptionalText(request.LiveError, 500),
+            LastSeenAt = now,
+            FirstSeenAt = now
+        };
+        db.DeviceStatuses.Add(device);
+    }
+    else
+    {
+        device.DeviceName = deviceName;
+        device.Manufacturer = CleanOptionalText(request.Manufacturer, 80);
+        device.Model = CleanOptionalText(request.Model, 120);
+        device.AndroidVersion = CleanOptionalText(request.AndroidVersion, 80);
+        device.AppVersion = CleanOptionalText(request.AppVersion, 40);
+        device.BatteryLevel = request.BatteryLevel;
+        device.IsCharging = request.IsCharging;
+        device.ChargingSource = CleanOptionalText(request.ChargingSource, 32);
+        device.PowerSaveMode = request.PowerSaveMode;
+        device.VideoRecordingActive = request.VideoRecordingActive;
+        device.AudioRecordingActive = request.AudioRecordingActive;
+        device.LiveAccessEnabled = request.LiveAccessEnabled;
+        device.LiveStreaming = request.LiveStreaming;
+        device.LiveError = CleanOptionalText(request.LiveError, 500);
+        device.LastSeenAt = now;
+    }
+    if (!request.LiveAccessEnabled || request.VideoRecordingActive || request.AudioRecordingActive)
+    {
+        device.LiveRequested = false;
+        device.LiveStreaming = false;
+        liveFrames.Remove(deviceId);
+    }
+    else if (device.LiveRequested && !liveFrames.HasRecentViewer(deviceId, TimeSpan.FromSeconds(10)))
+    {
+        device.LiveRequested = false;
+        device.LiveStreaming = false;
+        device.LiveError = string.Empty;
+        liveFrames.Remove(deviceId);
+    }
+
+    await db.SaveChangesAsync(cancellationToken);
+    return Results.Ok(ToDeviceResponse(device, now));
+});
+
+app.MapGet("/api/devices", async (DashcamDbContext db, CancellationToken cancellationToken) =>
+{
+    var now = DateTime.UtcNow;
+    var devices = await db.DeviceStatuses.AsNoTracking()
+        .OrderByDescending(device => device.LastSeenAt)
+        .ToListAsync(cancellationToken);
+    return Results.Ok(new
+    {
+        serverTime = now,
+        onlineThresholdSeconds = 180,
+        items = devices.Select(device => ToDeviceResponse(device, now))
+    });
+});
+
+app.MapPost("/api/devices/{deviceId}/live", async (
+    string deviceId,
+    LiveRequest request,
+    DashcamDbContext db,
+    LiveFrameStore liveFrames,
+    CancellationToken cancellationToken) =>
+{
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null) return Results.NotFound(new { error = "Device not found." });
+
+    if (request.Enabled)
+    {
+        var online = DateTime.UtcNow - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(180);
+        if (!online) return Results.Conflict(new { error = "Phone is offline." });
+        if (!device.LiveAccessEnabled) return Results.Conflict(new { error = "Live Access is disabled on the phone." });
+        if (device.VideoRecordingActive || device.AudioRecordingActive)
+            return Results.Conflict(new { error = "Phone is recording." });
+        device.LiveError = string.Empty;
+        liveFrames.TouchViewer(deviceId);
+    }
+    else
+    {
+        device.LiveStreaming = false;
+        device.LiveError = string.Empty;
+        liveFrames.Remove(deviceId);
+    }
+
+    device.LiveRequested = request.Enabled;
+    await db.SaveChangesAsync(cancellationToken);
+    return Results.Ok(ToDeviceResponse(device, DateTime.UtcNow));
+});
+
+app.MapPost("/api/devices/{deviceId}/live/frame", async (
+    string deviceId,
+    HttpRequest request,
+    DashcamDbContext db,
+    LiveFrameStore liveFrames,
+    CancellationToken cancellationToken) =>
+{
+    const int maxFrameBytes = 2 * 1024 * 1024;
+    if (!string.Equals(request.ContentType, "image/jpeg", StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest(new { error = "image/jpeg is required." });
+    if (request.ContentLength is null or <= 0 || request.ContentLength > maxFrameBytes)
+        return Results.BadRequest(new { error = "A JPEG frame up to 2 MB is required." });
+
+    var device = await db.DeviceStatuses.AsNoTracking()
+        .FirstOrDefaultAsync(item => item.DeviceId == deviceId, cancellationToken);
+    if (device is null) return Results.NotFound(new { error = "Device not found." });
+    if (!device.LiveRequested || !device.LiveAccessEnabled)
+        return Results.Conflict(new { error = "Live viewing is not requested." });
+
+    await using var buffer = new MemoryStream((int)request.ContentLength.Value);
+    await request.Body.CopyToAsync(buffer, cancellationToken);
+    if (buffer.Length == 0 || buffer.Length > maxFrameBytes)
+        return Results.BadRequest(new { error = "Invalid JPEG frame." });
+    liveFrames.Set(deviceId, buffer.ToArray());
+    return Results.NoContent();
+});
+
+app.MapGet("/api/devices/{deviceId}/live/frame", (
+    string deviceId,
+    LiveFrameStore liveFrames) =>
+{
+    liveFrames.TouchViewer(deviceId);
+    if (!liveFrames.TryGet(deviceId, out var frame))
+        return Results.NotFound(new { error = "No live frame is available." });
+    return Results.File(frame.Jpeg, "image/jpeg", lastModified: frame.CapturedAt);
+});
 
 app.MapPost("/api/videos/upload", async (
     HttpRequest request,
@@ -640,6 +802,64 @@ static async Task EnsureAudioTableAsync(DashcamDbContext db)
         "CREATE INDEX IF NOT EXISTS IX_AudioRecordings_Locked ON AudioRecordings (Locked)");
 }
 
+static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
+{
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS DeviceStatuses (
+            DeviceId TEXT NOT NULL CONSTRAINT PK_DeviceStatuses PRIMARY KEY,
+            DeviceName TEXT NOT NULL,
+            Manufacturer TEXT NOT NULL,
+            Model TEXT NOT NULL,
+            AndroidVersion TEXT NOT NULL,
+            AppVersion TEXT NOT NULL,
+            BatteryLevel INTEGER NOT NULL,
+            IsCharging INTEGER NOT NULL,
+            ChargingSource TEXT NOT NULL,
+            PowerSaveMode INTEGER NOT NULL,
+            VideoRecordingActive INTEGER NOT NULL,
+            AudioRecordingActive INTEGER NOT NULL,
+            LiveAccessEnabled INTEGER NOT NULL DEFAULT 0,
+            LiveRequested INTEGER NOT NULL DEFAULT 0,
+            LiveStreaming INTEGER NOT NULL DEFAULT 0,
+            LiveError TEXT NOT NULL DEFAULT '',
+            LastSeenAt TEXT NOT NULL,
+            FirstSeenAt TEXT NOT NULL
+        )
+        """);
+    await db.Database.ExecuteSqlRawAsync(
+        "CREATE INDEX IF NOT EXISTS IX_DeviceStatuses_LastSeenAt ON DeviceStatuses (LastSeenAt)");
+    await EnsureColumnAsync(db, "DeviceStatuses", "LiveAccessEnabled", "INTEGER NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "DeviceStatuses", "LiveRequested", "INTEGER NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "DeviceStatuses", "LiveStreaming", "INTEGER NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "DeviceStatuses", "LiveError", "TEXT NOT NULL DEFAULT ''");
+}
+
+static async Task EnsureColumnAsync(DashcamDbContext db, string table, string column, string definition)
+{
+    var connection = db.Database.GetDbConnection();
+    if (connection.State != System.Data.ConnectionState.Open) await connection.OpenAsync();
+    await using var check = connection.CreateCommand();
+    check.CommandText = $"PRAGMA table_info('{table}')";
+    var exists = false;
+    await using (var reader = await check.ExecuteReaderAsync())
+    {
+        while (await reader.ReadAsync())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+            {
+                exists = true;
+                break;
+            }
+        }
+    }
+    if (!exists)
+    {
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
+        await alter.ExecuteNonQueryAsync();
+    }
+}
+
 static string CleanFileBase(string value)
 {
     var invalid = Path.GetInvalidFileNameChars().ToHashSet();
@@ -731,6 +951,42 @@ static object ToAudioResponse(AudioRecording audio) => new
     streamUrl = $"/api/audio/{audio.Id}/stream"
 };
 
+static object ToDeviceResponse(DeviceStatus device, DateTime now) => new
+{
+    device.DeviceId,
+    device.DeviceName,
+    device.Manufacturer,
+    device.Model,
+    device.AndroidVersion,
+    device.AppVersion,
+    device.BatteryLevel,
+    device.IsCharging,
+    device.ChargingSource,
+    device.PowerSaveMode,
+    device.VideoRecordingActive,
+    device.AudioRecordingActive,
+    device.LiveAccessEnabled,
+    device.LiveRequested,
+    device.LiveStreaming,
+    device.LiveError,
+    Online = now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(180),
+    LastSeenAt = AsUtc(device.LastSeenAt),
+    FirstSeenAt = AsUtc(device.FirstSeenAt)
+};
+
+static string? CleanRequiredText(string? value, int maxLength)
+{
+    var cleaned = value?.Trim();
+    if (string.IsNullOrWhiteSpace(cleaned)) return null;
+    return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength];
+}
+
+static string CleanOptionalText(string? value, int maxLength)
+{
+    var cleaned = value?.Trim() ?? string.Empty;
+    return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength];
+}
+
 static DateTime AsUtc(DateTime value) => value.Kind switch
 {
     DateTimeKind.Utc => value,
@@ -751,3 +1007,20 @@ public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
+public sealed record DeviceHeartbeatRequest(
+    string? DeviceId,
+    string? DeviceName,
+    string? Manufacturer,
+    string? Model,
+    string? AndroidVersion,
+    string? AppVersion,
+    int BatteryLevel,
+    bool IsCharging,
+    string? ChargingSource,
+    bool PowerSaveMode,
+    bool VideoRecordingActive,
+    bool AudioRecordingActive,
+    bool LiveAccessEnabled,
+    bool LiveStreaming,
+    string? LiveError);
+public sealed record LiveRequest(bool Enabled);

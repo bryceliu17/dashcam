@@ -43,6 +43,10 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
         <service
+            android:name=".live.LiveAccessService"
+            android:exported="false"
+            android:foregroundServiceType="camera|dataSync" />
+        <service
             android:name=".recording.VolumeKeyAccessibilityService"
             android:exported="true"
             android:label="@string/volume_key_accessibility_label"

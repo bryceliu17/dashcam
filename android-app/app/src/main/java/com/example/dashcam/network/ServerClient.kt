@@ -14,6 +14,26 @@ import java.io.File
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 
+data class DeviceHeartbeat(
+    val deviceId: String,
+    val deviceName: String,
+    val manufacturer: String,
+    val model: String,
+    val androidVersion: String,
+    val appVersion: String,
+    val batteryLevel: Int,
+    val isCharging: Boolean,
+    val chargingSource: String,
+    val powerSaveMode: Boolean,
+    val videoRecordingActive: Boolean,
+    val audioRecordingActive: Boolean,
+    val liveAccessEnabled: Boolean,
+    val liveStreaming: Boolean,
+    val liveError: String
+)
+
+data class DeviceControl(val liveRequested: Boolean)
+
 class ServerClient(private val baseUrl: String) {
     private val client = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
@@ -83,6 +103,53 @@ class ServerClient(private val baseUrl: String) {
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
+        }
+    }
+
+    fun reportDeviceStatus(status: DeviceHeartbeat): DeviceControl {
+        val json = JSONObject()
+            .put("deviceId", status.deviceId)
+            .put("deviceName", status.deviceName)
+            .put("manufacturer", status.manufacturer)
+            .put("model", status.model)
+            .put("androidVersion", status.androidVersion)
+            .put("appVersion", status.appVersion)
+            .put("batteryLevel", status.batteryLevel)
+            .put("isCharging", status.isCharging)
+            .put("chargingSource", status.chargingSource)
+            .put("powerSaveMode", status.powerSaveMode)
+            .put("videoRecordingActive", status.videoRecordingActive)
+            .put("audioRecordingActive", status.audioRecordingActive)
+            .put("liveAccessEnabled", status.liveAccessEnabled)
+            .put("liveStreaming", status.liveStreaming)
+            .put("liveError", status.liveError)
+            .toString()
+            .toRequestBody("application/json".toMediaType())
+        val request = Request.Builder().url("${cleanBase()}/api/devices/heartbeat")
+            .header("Connection", "close")
+            .post(json).build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
+            }
+            val json = JSONObject(text)
+            return DeviceControl(json.optBoolean("liveRequested", false))
+        }
+    }
+
+    fun uploadLiveFrame(deviceId: String, jpeg: ByteArray) {
+        val body = jpeg.toRequestBody("image/jpeg".toMediaType())
+        val request = Request.Builder()
+            .url("${cleanBase()}/api/devices/$deviceId/live/frame")
+            .header("Connection", "close")
+            .post(body)
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val text = response.body?.string().orEmpty()
+                throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
+            }
         }
     }
 

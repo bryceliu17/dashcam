@@ -37,6 +37,8 @@ function Icon({ name }) {
     trash: <><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7"/><path d="M10 11v5m4-5v5"/></>,
     refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .7-8.7L20 11"/></>,
     rotate: <><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 1-2-5"/></>,
+    camera: <><path d="M7 7 9 4h6l2 3"/><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13.5" r="3.5"/></>,
+    stop: <rect x="7" y="7" width="10" height="10" rx="1"/>,
     fullscreen: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></>,
   }
@@ -258,13 +260,71 @@ function WaveformAudio({ recording }) {
   </div>
 }
 
+function LiveViewer({ device, onClose }) {
+  const [frameUrl, setFrameUrl] = useState('')
+  const [waiting, setWaiting] = useState(true)
+  const objectUrlRef = useRef('')
+
+  useEffect(() => {
+    let active = true
+    let timer
+    const loadFrame = async () => {
+      try {
+        const response = await fetch(
+          `${API}/api/devices/${encodeURIComponent(device.deviceId)}/live/frame?t=${Date.now()}`,
+          { cache: 'no-store' },
+        )
+        if (response.ok) {
+          const nextUrl = URL.createObjectURL(await response.blob())
+          if (!active) {
+            URL.revokeObjectURL(nextUrl)
+            return
+          }
+          if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+          objectUrlRef.current = nextUrl
+          setFrameUrl(nextUrl)
+          setWaiting(false)
+        } else {
+          setWaiting(true)
+        }
+      } catch {
+        setWaiting(true)
+      } finally {
+        if (active) timer = window.setTimeout(loadFrame, 400)
+      }
+    }
+    loadFrame()
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+    }
+  }, [device.deviceId])
+
+  return <div className="modal" onMouseDown={onClose}>
+    <div className="player live-player" onMouseDown={event => event.stopPropagation()}>
+      <div>
+        <strong>{device.deviceName} - Live</strong>
+        <button className="close-player" aria-label="Stop and close live view" title="Stop live view" onClick={onClose}>X</button>
+      </div>
+      <div className="live-stage">
+        {frameUrl && <img src={frameUrl} alt={`Live camera from ${device.deviceName}`} />}
+        {waiting && <div className="live-waiting"><div className="spinner" /><span>Waiting for phone camera...</span></div>}
+      </div>
+      <p>{device.liveError || (device.liveStreaming ? 'Live camera connected' : 'Starting live camera')}</p>
+    </div>
+  </div>
+}
+
 export default function App() {
   const [videos, setVideos] = useState([])
   const [audio, setAudio] = useState([])
   const [storage, setStorage] = useState(null)
+  const [devices, setDevices] = useState([])
   const [online, setOnline] = useState(null)
   const [selected, setSelected] = useState(null)
   const [selectedAudio, setSelectedAudio] = useState(null)
+  const [liveDeviceId, setLiveDeviceId] = useState(null)
   const [archiveType, setArchiveType] = useState('video')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -282,8 +342,9 @@ export default function App() {
       const params = new URLSearchParams({ page: '1', pageSize: '200' })
       if (date) params.set('date', date)
       if (lockFilter !== 'all') params.set('locked', lockFilter)
-      const [health, list, audioList, status] = await Promise.all([
-        api('/api/health'), api(`/api/videos?${params}`), api(`/api/audio?${params}`), api('/api/storage/status'),
+      const [health, list, audioList, status, deviceList] = await Promise.all([
+        api('/api/health'), api(`/api/videos?${params}`), api(`/api/audio?${params}`),
+        api('/api/storage/status'), api('/api/devices'),
       ])
       setOnline(health.status === 'ok')
       setVideos(list.items)
@@ -291,6 +352,7 @@ export default function App() {
       setSelectedVideoIds(current => new Set([...current].filter(id => list.items.some(item => item.id === id))))
       setSelectedAudioIds(current => new Set([...current].filter(id => audioList.items.some(item => item.id === id))))
       setStorage(status)
+      setDevices(deviceList.items)
     } catch (err) {
       setOnline(false)
       setError(err.message)
@@ -300,11 +362,41 @@ export default function App() {
   }, [date, lockFilter])
 
   useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      api('/api/devices').then(result => setDevices(result.items)).catch(() => {})
+    }, 5_000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   const storagePercent = useMemo(() => storage
     ? Math.min(100, storage.totalSizeBytes / storage.maxStorageBytes * 100) : 0, [storage])
   const audioStoragePercent = useMemo(() => storage
     ? Math.min(100, storage.totalAudioSizeBytes / storage.maxAudioStorageBytes * 100) : 0, [storage])
+  const liveDevice = devices.find(device => device.deviceId === liveDeviceId)
+
+  const startLive = async (device) => {
+    setError('')
+    try {
+      const updated = await api(`/api/devices/${encodeURIComponent(device.deviceId)}/live`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: true }),
+      })
+      setDevices(items => items.map(item => item.deviceId === updated.deviceId ? updated : item))
+      setLiveDeviceId(device.deviceId)
+    } catch (err) { setError(err.message) }
+  }
+
+  const stopLive = async (deviceId) => {
+    setLiveDeviceId(null)
+    try {
+      const updated = await api(`/api/devices/${encodeURIComponent(deviceId)}/live`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: false }),
+      })
+      setDevices(items => items.map(item => item.deviceId === updated.deviceId ? updated : item))
+    } catch (err) { setError(err.message) }
+  }
 
   const toggleLock = async (video) => {
     try {
@@ -471,6 +563,36 @@ export default function App() {
 
       {error && <div className="error">{error}</div>}
 
+      <section className="devices">
+        <div className="section-head">
+          <div><p className="eyebrow">CONNECTED DEVICES</p><h2>Dashcam phones</h2></div>
+          <span className="device-count">{devices.filter(device => device.online).length} online / {devices.length} known</span>
+        </div>
+        <div className="device-table-wrap">
+          <table className="device-table">
+            <thead><tr><th>Device</th><th>Status</th><th>Battery</th><th>Power</th><th>Activity</th><th>Software</th><th>Last seen</th><th>Live</th></tr></thead>
+            <tbody>{devices.map(device => <tr key={device.deviceId}>
+              <td className="device-name"><strong>{device.deviceName}</strong><small>{device.manufacturer} {device.model}</small></td>
+              <td><span className={`device-status ${device.online ? 'online' : 'offline'}`}><i />{device.online ? 'Online' : 'Offline'}</span></td>
+              <td>
+                <div className="battery-value"><span>{device.batteryLevel}%</span><div><i style={{ width: `${device.batteryLevel}%` }} /></div></div>
+              </td>
+              <td><span>{device.isCharging ? `${device.chargingSource} charging` : 'On battery'}</span><small className={device.powerSaveMode ? 'power-save active' : 'power-save'}>{device.powerSaveMode ? 'Power saving' : 'Normal power'}</small></td>
+              <td>{device.liveStreaming ? 'Live streaming' : device.videoRecordingActive ? 'Video recording' : device.audioRecordingActive ? 'Audio recording' : 'Idle'}</td>
+              <td><span>Android {device.androidVersion}</span><small className="software-version">App {device.appVersion}</small></td>
+              <td>{formatDate(device.lastSeenAt)}</td>
+              <td><button
+                className={`device-live-button ${device.liveRequested ? 'stop' : ''}`}
+                disabled={!device.liveRequested && (!device.online || !device.liveAccessEnabled || device.videoRecordingActive || device.audioRecordingActive)}
+                title={!device.liveAccessEnabled ? 'Enable Live Access on the phone' : device.liveRequested ? 'Stop live view' : 'Start live view'}
+                onClick={() => device.liveRequested ? stopLive(device.deviceId) : startLive(device)}
+              ><Icon name={device.liveRequested ? 'stop' : 'camera'} />{device.liveRequested ? 'Stop' : 'View'}</button></td>
+            </tr>)}</tbody>
+          </table>
+          {!loading && devices.length === 0 && <div className="device-empty">No phones have reported to this server yet.</div>}
+        </div>
+      </section>
+
       <section className="archive">
         <div className="archive-tabs" role="tablist">
           <button className={archiveType === 'video' ? 'active' : ''} onClick={() => setArchiveType('video')}>Video</button>
@@ -544,5 +666,6 @@ export default function App() {
       <WaveformAudio recording={selectedAudio} />
       <p>{formatDate(selectedAudio.startTime)} | {formatDuration(selectedAudio.durationSeconds)} | {formatBytes(selectedAudio.fileSizeBytes)}</p>
     </div></div>}
+    {liveDevice && <LiveViewer device={liveDevice} onClose={() => stopLive(liveDevice.deviceId)} />}
   </div>
 }

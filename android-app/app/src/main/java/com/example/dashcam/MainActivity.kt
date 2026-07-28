@@ -59,6 +59,8 @@ import com.example.dashcam.data.AudioEntity
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.UploadStatus
 import com.example.dashcam.data.VideoEntity
+import com.example.dashcam.live.LiveAccessService
+import com.example.dashcam.live.LiveAccessSettings
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
 import com.example.dashcam.recording.AudioRecordingService
@@ -82,15 +84,18 @@ import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
     private lateinit var recordingStatus: TextView
+    private lateinit var backgroundStatus: TextView
     private lateinit var audioStatus: TextView
     private lateinit var chargingStatus: TextView
     private lateinit var serverStatus: TextView
     private lateinit var storageStatus: TextView
+    private lateinit var audioStorageStatus: TextView
     private lateinit var serverUrl: EditText
     private lateinit var serverUrlDisplay: TextView
     private lateinit var previewRecordButton: Button
     private lateinit var backgroundRecordButton: Button
     private lateinit var audioRecordButton: Button
+    private lateinit var liveAccessButton: Button
     private lateinit var recordingModeSpinner: Spinner
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
@@ -127,6 +132,9 @@ class MainActivity : ComponentActivity() {
     private var audioRecordingActive = false
     private var audioElapsedSeconds = 0
     private var audioFilename: String? = null
+    private var liveAccessEnabled = false
+    private var liveStreaming = false
+    private var liveError = ""
     private var audioPlayer: MediaPlayer? = null
     private var playingAudioPath: String? = null
     private lateinit var audioPlaybackTitle: TextView
@@ -175,6 +183,12 @@ class MainActivity : ComponentActivity() {
             toast("Microphone permission is required")
         }
     }
+    private val livePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) enableLiveAccess() else toast("Camera permission is required for Live Access")
+    }
+
     private val audioPlaybackRunnable = object : Runnable {
         override fun run() {
             updateAudioPlaybackControls()
@@ -198,7 +212,8 @@ class MainActivity : ComponentActivity() {
             if (!PowerRecordingSettings.isPowerAutoBackgroundEnabled(this@MainActivity)) return
             when (intent?.action) {
                 Intent.ACTION_POWER_CONNECTED -> {
-                    if (recording == null && !continueRecording && !backgroundRecordingActive &&
+                    if (!liveStreaming &&
+                        recording == null && !continueRecording && !backgroundRecordingActive &&
                         !PowerRecordingSettings.isAnyRecordingActive(this@MainActivity)
                     ) {
                         startBackgroundDashcam()
@@ -237,12 +252,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val liveStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val wasStreaming = liveStreaming
+            val previousError = liveError
+            liveAccessEnabled = intent?.getBooleanExtra(LiveAccessService.EXTRA_ENABLED, false) == true
+            liveStreaming = intent?.getBooleanExtra(LiveAccessService.EXTRA_STREAMING, false) == true
+            liveError = intent?.getStringExtra(LiveAccessService.EXTRA_ERROR).orEmpty()
+            if (liveStreaming && !wasStreaming) {
+                RecordingService.previewSurfaceProvider = null
+                cameraProvider?.unbindAll()
+            } else if (!liveStreaming && wasStreaming) {
+                updatePreviewAvailability()
+            }
+            if (liveError.isNotBlank() && liveError != previousError) toast(liveError)
+            updateRecordingStatus()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         backgroundRecordingActive = PowerRecordingSettings.isBackgroundRecordingActive(this)
         audioRecordingActive = PowerRecordingSettings.isAudioRecordingActive(this)
+        liveAccessEnabled = LiveAccessSettings.isEnabled(this)
+        liveStreaming = LiveAccessSettings.isStreaming(this)
+        liveError = LiveAccessSettings.error(this)
         val prefs = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
         buildUi()
+        if (liveAccessEnabled &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        ) {
+            LiveAccessService.enable(this)
+        }
         serverUrl.setText(prefs.getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL))
         setRecordingPreference(false)
         if (PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)) PowerMonitorService.start(this)
@@ -277,6 +318,7 @@ class MainActivity : ComponentActivity() {
         ContextCompat.registerReceiver(this, stateReceiver, IntentFilter(RecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, backgroundStateReceiver, IntentFilter(BackgroundRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, audioStateReceiver, IntentFilter(AudioRecordingService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, liveStateReceiver, IntentFilter(LiveAccessService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
         ContextCompat.registerReceiver(this, powerReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
@@ -298,6 +340,7 @@ class MainActivity : ComponentActivity() {
         try { unregisterReceiver(stateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(backgroundStateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(audioStateReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(liveStateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(batteryReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(powerReceiver) } catch (_: IllegalArgumentException) { }
         RecordingService.previewSurfaceProvider = null
@@ -331,12 +374,23 @@ class MainActivity : ComponentActivity() {
         })
 
         recordingStatus = statusRow("Recording")
+        backgroundStatus = statusRow("Background")
         audioStatus = statusRow("Audio")
         chargingStatus = statusRow("Power")
         serverStatus = statusRow("Home Server")
         storageStatus = statusRow("Local Videos")
-        listOf(recordingStatus, audioStatus, chargingStatus, serverStatus, storageStatus).forEach(root::addView)
+        audioStorageStatus = statusRow("Local Audio")
+        listOf(
+            recordingStatus,
+            backgroundStatus,
+            audioStatus,
+            chargingStatus,
+            serverStatus,
+            storageStatus,
+            audioStorageStatus
+        ).forEach(root::addView)
         updateStorageStatus()
+        updateAudioStorageStatus()
 
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -413,6 +467,11 @@ class MainActivity : ComponentActivity() {
             showLocalAudio()
         }, weighted().apply { marginStart = dp(8) })
         root.addView(audioControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
+        liveAccessButton = actionButton("Live Access") {
+            toggleLiveAccess()
+        }
+        root.addView(liveAccessButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        updateLiveAccessButton()
         root.addView(TextView(this).apply {
             text = "Recording Mode"
             textSize = 12f
@@ -1192,6 +1251,10 @@ class MainActivity : ComponentActivity() {
     private fun weighted() = LinearLayout.LayoutParams(0, -1, 1f)
 
     private fun requestStart() {
+        if (liveStreaming) {
+            toast("Stop Live streaming first")
+            return
+        }
         if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
             toast("Stop audio recording first")
             return
@@ -1216,6 +1279,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestBackgroundStart() {
+        if (liveStreaming) {
+            toast("Stop Live streaming first")
+            return
+        }
         if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
             toast("Stop audio recording first")
             return
@@ -1285,6 +1352,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startAudioRecording() {
+        if (liveStreaming) {
+            toast("Stop Live streaming first")
+            return
+        }
         if (recording != null || continueRecording || backgroundRecordingActive ||
             PowerRecordingSettings.isBackgroundRecordingActive(this)
         ) {
@@ -1375,6 +1446,7 @@ class MainActivity : ComponentActivity() {
 
     private fun updateModeButtons() {
         if (::recordingModeSpinner.isInitialized) {
+            recordingModeSpinner.isEnabled = !liveStreaming
             val position = currentRecordingMode().ordinal
             if (recordingModeSpinner.selectedItemPosition != position) {
                 recordingModeSpinner.setSelection(position, false)
@@ -1401,8 +1473,50 @@ class MainActivity : ComponentActivity() {
     private fun updateBackgroundRecordButton() {
         if (::backgroundRecordButton.isInitialized) {
             backgroundRecordButton.text = if (backgroundRecordingActive) "Stop Background" else "Start Background"
-            backgroundRecordButton.isEnabled = backgroundRecordingActive ||
-                (recording == null && !continueRecording && !audioRecordingActive)
+            backgroundRecordButton.isEnabled = !liveStreaming && (
+                backgroundRecordingActive ||
+                    (recording == null && !continueRecording && !audioRecordingActive)
+                )
+        }
+    }
+
+    private fun toggleLiveAccess() {
+        if (LiveAccessSettings.isEnabled(this)) {
+            LiveAccessService.disable(this)
+            liveAccessEnabled = false
+            liveStreaming = false
+            liveError = ""
+            updateLiveAccessButton()
+            updateRecordingStatus()
+            toast("Live Access disabled")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            enableLiveAccess()
+        } else {
+            livePermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun enableLiveAccess() {
+        LiveAccessSettings.setEnabled(this, true)
+        liveAccessEnabled = true
+        liveError = ""
+        LiveAccessService.enable(this)
+        updateLiveAccessButton()
+        toast("Live Access enabled")
+    }
+
+    private fun updateLiveAccessButton() {
+        if (!::liveAccessButton.isInitialized) return
+        liveAccessEnabled = LiveAccessSettings.isEnabled(this)
+        liveStreaming = LiveAccessSettings.isStreaming(this)
+        liveError = LiveAccessSettings.error(this)
+        liveAccessButton.text = when {
+            liveStreaming -> "Live: Streaming"
+            liveAccessEnabled && liveError.isNotBlank() -> "Live Access: On (Unavailable)"
+            liveAccessEnabled -> "Live Access: On"
+            else -> "Live Access: Off"
         }
     }
 
@@ -1469,7 +1583,7 @@ class MainActivity : ComponentActivity() {
         if (!::previewView.isInitialized) return
         val powerAutoEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(this)
         val volumeKeyStartEnabled = PowerRecordingSettings.isVolumeKeyStartEnabled(this)
-        if (powerAutoEnabled || volumeKeyStartEnabled) {
+        if (powerAutoEnabled || volumeKeyStartEnabled || liveStreaming) {
             RecordingService.previewSurfaceProvider = null
             previewView.isEnabled = false
             previewView.alpha = 0.35f
@@ -1735,10 +1849,17 @@ class MainActivity : ComponentActivity() {
         storageStatus.text = "Local Videos: ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.MAX_VIDEO_BYTES)}"
     }
 
+    private fun updateAudioStorageStatus() {
+        if (!::audioStorageStatus.isInitialized) return
+        audioStorageStatus.text =
+            "Local Audio: ${audioRecords.size} recordings - ${formatBytes(audioRecords.sumOf { it.fileSizeBytes })} / ${formatBytes(AudioStoragePolicy.MAX_AUDIO_BYTES)}"
+    }
+
     private fun observeAudioRecords() {
         lifecycleScope.launch {
             DashcamDatabase.get(this@MainActivity).audioDao().observeAll().collectLatest { items ->
                 audioRecords = items
+                updateAudioStorageStatus()
             }
         }
     }
@@ -1843,6 +1964,7 @@ class MainActivity : ComponentActivity() {
             audioFilename = null
         }
         updateStorageStatus()
+        updateAudioStorageStatus()
         renderCharging(currentBatteryIntent())
         updateRecordingStatus()
         renderAudioStatus()
@@ -1868,17 +1990,19 @@ class MainActivity : ComponentActivity() {
 
     private fun renderAudioStatus() {
         if (::audioStatus.isInitialized) {
-            val name = audioFilename?.let { " - $it" }.orEmpty()
             audioStatus.text = if (audioRecordingActive) {
-                "Audio: Recording - Current segment: ${formatDurationSeconds(audioElapsedSeconds)}$name"
+                val currentFile = audioFilename?.let { "\nCurrent: $it" }.orEmpty()
+                "Audio: Recording - ${formatDurationSeconds(audioElapsedSeconds)}$currentFile"
             } else {
                 "Audio: Stopped"
             }
         }
         if (::audioRecordButton.isInitialized) {
             audioRecordButton.text = if (audioRecordingActive) "Stop Audio" else "Start Audio"
-            audioRecordButton.isEnabled = audioRecordingActive ||
-                (recording == null && !continueRecording && !backgroundRecordingActive)
+            audioRecordButton.isEnabled = !liveStreaming && (
+                audioRecordingActive ||
+                    (recording == null && !continueRecording && !backgroundRecordingActive)
+                )
         }
         updateBackgroundRecordButton()
     }
@@ -1892,26 +2016,36 @@ class MainActivity : ComponentActivity() {
         } else {
             "00:00"
         }
-        val started = manualStartTime?.let {
-            DateFormat.getTimeInstance(DateFormat.MEDIUM, Locale.getDefault()).format(Date(it))
-        } ?: "--"
-        val backgroundStatus = if (backgroundRecordingActive) {
-            val name = backgroundFilename?.let { " - $it" }.orEmpty()
-            "\nBackground: Recording - ${formatDurationSeconds(backgroundElapsedSeconds)}$name"
+        recordingStatus.text = if (active) {
+            val details = buildList {
+                add("Completed: $completedSegmentsSinceManualStart")
+                segmentFile?.name?.let { add("Current: $it") }
+            }.joinToString(" - ")
+            "Recording: $status - $elapsed\n$details"
         } else {
-            "\nBackground: Stopped"
+            "Recording: Stopped"
         }
-        recordingStatus.text = "Recording: $status - Current segment: $elapsed\nStarted at: $started - Auto-generated clips: ${completedSegmentsSinceManualStart} - Overwritten clips: ${overwrittenVideosSinceManualStart}$backgroundStatus"
+        if (::backgroundStatus.isInitialized) {
+            backgroundStatus.text = if (backgroundRecordingActive) {
+                val currentFile = backgroundFilename?.let { "\nCurrent: $it" }.orEmpty()
+                "Background: Recording - ${formatDurationSeconds(backgroundElapsedSeconds)}$currentFile"
+            } else {
+                "Background: Stopped"
+            }
+        }
         if (::previewRecordButton.isInitialized) {
             previewRecordButton.text = if (active) "Stop Dashcam" else "Start Dashcam"
-            previewRecordButton.isEnabled = active ||
-                (!backgroundRecordingActive &&
-                    !audioRecordingActive &&
-                    !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) &&
-                    !PowerRecordingSettings.isVolumeKeyStartEnabled(this))
+            previewRecordButton.isEnabled = !liveStreaming && (
+                active ||
+                    (!backgroundRecordingActive &&
+                        !audioRecordingActive &&
+                        !PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) &&
+                        !PowerRecordingSettings.isVolumeKeyStartEnabled(this))
+                )
         }
         updateBackgroundRecordButton()
         renderAudioStatus()
+        updateLiveAccessButton()
         updateModeButtons()
     }
 
