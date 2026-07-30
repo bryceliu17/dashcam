@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
+const int DeviceOnlineThresholdSeconds = 75;
+
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 4L * 1024 * 1024 * 1024);
 
@@ -123,7 +125,7 @@ app.MapGet("/api/devices", async (DashcamDbContext db, CancellationToken cancell
     return Results.Ok(new
     {
         serverTime = now,
-        onlineThresholdSeconds = 180,
+        onlineThresholdSeconds = DeviceOnlineThresholdSeconds,
         items = devices.Select(device => ToDeviceResponse(device, now))
     });
 });
@@ -140,7 +142,8 @@ app.MapPost("/api/devices/{deviceId}/live", async (
 
     if (request.Enabled)
     {
-        var online = DateTime.UtcNow - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(180);
+        var online = DateTime.UtcNow - AsUtc(device.LastSeenAt) <=
+            TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds);
         if (!online) return Results.Conflict(new { error = "Phone is offline." });
         if (!device.LiveAccessEnabled) return Results.Conflict(new { error = "Live Access is disabled on the phone." });
         if (device.VideoRecordingActive || device.AudioRecordingActive)
@@ -976,7 +979,7 @@ static object ToDeviceResponse(DeviceStatus device, DateTime now) => new
     device.LiveRequested,
     device.LiveStreaming,
     device.LiveError,
-    Online = now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(180),
+    Online = now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds),
     LastSeenAt = AsUtc(device.LastSeenAt),
     FirstSeenAt = AsUtc(device.FirstSeenAt)
 };
