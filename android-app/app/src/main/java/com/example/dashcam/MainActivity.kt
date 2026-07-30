@@ -59,6 +59,7 @@ import com.example.dashcam.data.UploadStatus
 import com.example.dashcam.data.VideoEntity
 import com.example.dashcam.live.LiveAccessService
 import com.example.dashcam.live.LiveAccessSettings
+import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
 import com.example.dashcam.recording.AudioRecordingService
@@ -1926,7 +1927,9 @@ class MainActivity : ComponentActivity() {
         saveServerUrl()
         serverStatus.text = "Home Server: Checking..."
         lifecycleScope.launch {
-            val online = withContext(Dispatchers.IO) { ServerClient(serverUrl.text.toString()).health() }
+            val online = withContext(Dispatchers.IO) {
+                DeviceStatusReporter.reportNow(this@MainActivity) != null
+            }
             serverStatus.text = "Home Server: ${if (online) "Online" else "Offline"}"
             if (showResult) toast(if (online) "Upload queued (Wi-Fi only)" else "Server unreachable; videos kept for retry")
         }

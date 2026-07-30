@@ -50,6 +50,12 @@ class ServerClient(private val baseUrl: String) {
         .readTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
         .build()
+    private val heartbeatClient = OkHttpClient.Builder()
+        .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build()
 
     fun health(): Boolean = try {
         val request = Request.Builder().url("${cleanBase()}/api/health")
@@ -137,7 +143,7 @@ class ServerClient(private val baseUrl: String) {
         val request = Request.Builder().url("${cleanBase()}/api/devices/heartbeat")
             .header("Connection", "close")
             .post(json).build()
-        client.newCall(request).execute().use { response ->
+        heartbeatClient.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
