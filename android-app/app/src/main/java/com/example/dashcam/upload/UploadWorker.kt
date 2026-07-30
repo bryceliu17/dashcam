@@ -68,8 +68,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             if (!audioOnly) dao.recoverManualUploads()
             if (!videoOnly) audioDao.recoverManualUploads()
         } else {
-            dao.recoverInterruptedUploads(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10))
-            audioDao.recoverInterruptedUploads(System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(10))
+            dao.recoverInterruptedUploads()
+            audioDao.recoverInterruptedUploads()
         }
         val serverUrl = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
