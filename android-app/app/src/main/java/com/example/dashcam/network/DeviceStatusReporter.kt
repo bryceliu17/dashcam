@@ -20,11 +20,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 object DeviceStatusReporter {
     private const val TAG = "DeviceStatusReporter"
     private const val REPORT_INTERVAL_MS = 60_000L
     private val started = AtomicBoolean(false)
+    private val serverReachable = AtomicReference<Boolean?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun start(context: Context) {
@@ -38,16 +40,29 @@ object DeviceStatusReporter {
         }
     }
 
-    fun reportNow(context: Context): DeviceControl? =
-        try {
+    fun reportNow(context: Context): DeviceControl? {
+        val appContext = context.applicationContext
+        return try {
             val serverUrl = context.getSharedPreferences(UploadWorker.PREFS, Context.MODE_PRIVATE)
                 .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
                 ?: UploadWorker.DEFAULT_SERVER_URL
-            ServerClient(serverUrl).reportDeviceStatus(readStatus(context))
+            ServerClient(serverUrl).reportDeviceStatus(readStatus(context)).also {
+                updateServerReachability(appContext, true)
+            }
         } catch (error: Exception) {
+            updateServerReachability(appContext, false)
             Log.d(TAG, "Device status heartbeat deferred: ${error.message.orEmpty()}")
             null
         }
+    }
+
+    private fun updateServerReachability(context: Context, reachable: Boolean) {
+        val previous = serverReachable.getAndSet(reachable)
+        if (reachable && previous == false && UploadWorker.isAutomaticUploadEnabled(context)) {
+            Log.i(TAG, "Server became reachable; queuing automatic upload")
+            UploadWorker.enqueueNow(context)
+        }
+    }
 
     fun deviceId(context: Context): String {
         val manufacturer = Build.MANUFACTURER.orEmpty()

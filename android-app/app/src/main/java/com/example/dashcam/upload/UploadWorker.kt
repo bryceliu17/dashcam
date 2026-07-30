@@ -17,7 +17,9 @@ import androidx.work.Constraints
 import androidx.work.workDataOf
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.network.ServerClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -88,6 +90,11 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 val serverId = client.upload(video, video.playbackRotationDegrees ?: defaultPlaybackRotation)
                 dao.markUploaded(video.id, serverId, System.currentTimeMillis())
                 uploadedVideos += 1
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable) {
+                    dao.markFailed(video.id, "Upload job was cancelled; queued for retry", System.currentTimeMillis())
+                }
+                throw cancelled
             } catch (error: Exception) {
                 failed = true
                 lastError = error.message?.take(500) ?: "Upload failed"
@@ -102,6 +109,15 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 val serverId = client.uploadAudio(audio)
                 audioDao.markUploaded(audio.id, serverId, System.currentTimeMillis())
                 uploadedAudio += 1
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable) {
+                    audioDao.markFailed(
+                        audio.id,
+                        "Upload job was cancelled; queued for retry",
+                        System.currentTimeMillis()
+                    )
+                }
+                throw cancelled
             } catch (error: Exception) {
                 failed = true
                 lastError = error.message?.take(500) ?: "Upload failed"
