@@ -606,7 +606,7 @@ export default function App() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       api('/api/devices').then(result => setDevices(result.items)).catch(() => {})
-    }, 5_000)
+    }, 15_000)
     return () => window.clearInterval(interval)
   }, [])
   useEffect(() => {

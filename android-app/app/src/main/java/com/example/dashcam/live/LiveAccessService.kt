@@ -373,7 +373,7 @@ class LiveAccessService : Service() {
         const val EXTRA_ERROR = "error"
         private const val CHANNEL_ID = "dashcam_live_access"
         private const val NOTIFICATION_ID = 2004
-        private const val CONTROL_INTERVAL_MS = 2_000L
+        private const val CONTROL_INTERVAL_MS = 15_000L
         private const val FRAME_INTERVAL_MS = 125L
         private const val CAMERA_RELEASE_DELAY_MS = 300L
         private const val TAG = "LiveAccessService"
