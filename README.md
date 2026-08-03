@@ -133,8 +133,8 @@ Create a `.env` file beside `compose.yaml` to change the location or server limi
 
 ```dotenv
 DASHCAM_DATA_PATH=E:/DashcamData
-DASHCAM_MAX_STORAGE_GB=200
-DASHCAM_MAX_AUDIO_STORAGE_GB=50
+DASHCAM_MAX_STORAGE_GB=235
+DASHCAM_MAX_AUDIO_STORAGE_GB=15
 ```
 
 Useful commands:
@@ -167,8 +167,8 @@ The API listens on the URL in `launchSettings.json` during development. Configur
   "ConnectionStrings": { "DashcamDatabase": "Data Source=dashcam.db" },
   "VideoStoragePath": "videos",
   "AudioStoragePath": "audio",
-  "MaxStorageGB": 200,
-  "MaxAudioStorageGB": 50
+  "MaxStorageGB": 235,
+  "MaxAudioStorageGB": 15
 }
 ```
 
@@ -403,8 +403,8 @@ D:\DashcamData\audio\YYYY-MM-DD\
 
 ```dotenv
 DASHCAM_DATA_PATH=E:/DashcamData
-DASHCAM_MAX_STORAGE_GB=200
-DASHCAM_MAX_AUDIO_STORAGE_GB=50
+DASHCAM_MAX_STORAGE_GB=235
+DASHCAM_MAX_AUDIO_STORAGE_GB=15
 ```
 
 常用命令：
@@ -437,8 +437,8 @@ dotnet run
   "ConnectionStrings": { "DashcamDatabase": "Data Source=dashcam.db" },
   "VideoStoragePath": "videos",
   "AudioStoragePath": "audio",
-  "MaxStorageGB": 200,
-  "MaxAudioStorageGB": 50
+  "MaxStorageGB": 235,
+  "MaxAudioStorageGB": 15
 }
 ```
 

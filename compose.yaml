@@ -13,8 +13,8 @@ services:
       VideoStoragePath: /data/videos
       AudioStoragePath: /data/audio
       ImportStagingPath: /data/import-staging
-      MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-240}
-      MaxAudioStorageGB: ${DASHCAM_MAX_AUDIO_STORAGE_GB:-10}
+      MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-235}
+      MaxAudioStorageGB: ${DASHCAM_MAX_AUDIO_STORAGE_GB:-15}
     volumes:
       - "E:/DashcamData:/data"
 
