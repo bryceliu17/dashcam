@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Dashcam.Api.Data;
 using Dashcam.Api.Models;
@@ -17,6 +18,9 @@ var connectionString = builder.Configuration.GetConnectionString("DashcamDatabas
     ?? "Data Source=dashcam.db";
 builder.Services.AddDbContext<DashcamDbContext>(options => options.UseSqlite(connectionString));
 builder.Services.AddSingleton<LiveFrameStore>();
+builder.Services.AddSingleton<ArchiveMutationGate>();
+builder.Services.AddSingleton<ArchiveMigrationService>();
+builder.Services.AddSingleton<MigrationUploadService>();
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 builder.Services.Configure<FormOptions>(options =>
@@ -25,6 +29,38 @@ builder.Services.Configure<FormOptions>(options =>
 var app = builder.Build();
 app.UseCors();
 var videoCleanupGate = new SemaphoreSlim(1, 1);
+var audioCleanupGate = new SemaphoreSlim(1, 1);
+
+app.Use(async (context, next) =>
+{
+    var isArchiveMutation = !HttpMethods.IsGet(context.Request.Method) &&
+        !HttpMethods.IsHead(context.Request.Method) &&
+        (context.Request.Path.StartsWithSegments("/api/videos") ||
+         context.Request.Path.StartsWithSegments("/api/audio"));
+    if (!isArchiveMutation)
+    {
+        await next();
+        return;
+    }
+
+    var migration = context.RequestServices.GetRequiredService<ArchiveMigrationService>();
+    if (migration.IsImporting)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new { error = "Archive migration is in progress. Try again after it finishes." });
+        return;
+    }
+
+    var mutationGate = context.RequestServices.GetRequiredService<ArchiveMutationGate>();
+    using var lease = await mutationGate.EnterAsync(context.RequestAborted);
+    if (migration.IsImporting)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new { error = "Archive migration is in progress. Try again after it finishes." });
+        return;
+    }
+    await next();
+});
 
 await using (var scope = app.Services.CreateAsyncScope())
 {
@@ -262,6 +298,18 @@ app.MapPost("/api/videos/upload", async (
             await file.CopyToAsync(stream, cancellationToken);
         File.Move(temporaryPath, finalPath);
 
+        var duplicate = await FindExactVideoDuplicateAsync(
+            db, originalFilename, startTime, endTime, durationSeconds, file.Length, finalPath, cancellationToken);
+        if (duplicate is not null)
+        {
+            if (!TryDelete(finalPath)) throw new IOException("The duplicate upload could not be discarded.");
+            loggerFactory.CreateLogger("Dashcam.UploadDeduplication").LogInformation(
+                "Discarded duplicate video upload {OriginalFilename}; returning existing video {VideoId}",
+                originalFilename,
+                duplicate.Id);
+            return Results.Ok(ToResponse(duplicate));
+        }
+
         var now = DateTime.UtcNow;
         var video = new Video
         {
@@ -306,6 +354,7 @@ app.MapPost("/api/audio/upload", async (
     HttpRequest request,
     DashcamDbContext db,
     IConfiguration configuration,
+    ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
     if (!request.HasFormContentType)
@@ -348,6 +397,18 @@ app.MapPost("/api/audio/upload", async (
             await file.CopyToAsync(stream, cancellationToken);
         File.Move(temporaryPath, finalPath);
 
+        var duplicate = await FindExactAudioDuplicateAsync(
+            db, originalFilename, startTime, endTime, durationSeconds, file.Length, finalPath, cancellationToken);
+        if (duplicate is not null)
+        {
+            if (!TryDelete(finalPath)) throw new IOException("The duplicate upload could not be discarded.");
+            loggerFactory.CreateLogger("Dashcam.UploadDeduplication").LogInformation(
+                "Discarded duplicate audio upload {OriginalFilename}; returning existing audio {AudioId}",
+                originalFilename,
+                duplicate.Id);
+            return Results.Ok(ToAudioResponse(duplicate));
+        }
+
         var now = DateTime.UtcNow;
         var audio = new AudioRecording
         {
@@ -364,6 +425,19 @@ app.MapPost("/api/audio/upload", async (
         };
         db.AudioRecordings.Add(audio);
         await db.SaveChangesAsync(cancellationToken);
+
+        try
+        {
+            await CleanupAudioAsync(db, configuration, audioCleanupGate, CancellationToken.None);
+        }
+        catch (Exception cleanupError)
+        {
+            loggerFactory.CreateLogger("Dashcam.AudioCleanup").LogError(
+                cleanupError,
+                "Automatic audio cleanup failed after uploading audio {AudioId}",
+                audio.Id);
+        }
+
         return Results.Created($"/api/audio/{audio.Id}", ToAudioResponse(audio));
     }
     catch
@@ -690,27 +764,68 @@ app.MapPost("/api/videos/cleanup", async (DashcamDbContext db, IConfiguration co
 
 app.MapPost("/api/audio/cleanup", async (DashcamDbContext db, IConfiguration config, CancellationToken token) =>
 {
-    var maxBytes = GetMaxAudioStorageBytes(config);
-    var totalBytes = await db.AudioRecordings.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
-    var removedCount = 0;
-    var removedBytes = 0L;
-    if (totalBytes > maxBytes)
+    var cleanup = await CleanupAudioAsync(db, config, audioCleanupGate, token);
+    return Results.Ok(new
     {
-        var candidates = await db.AudioRecordings.Where(x => !x.Locked)
-            .OrderBy(x => x.StartTime).ToListAsync(token);
-        foreach (var audio in candidates)
-        {
-            if (totalBytes <= maxBytes) break;
-            if (!TryDelete(audio.FilePath)) continue;
-            TryDeleteWaveformCaches(audio.FilePath);
-            totalBytes -= audio.FileSizeBytes;
-            removedBytes += audio.FileSizeBytes;
-            removedCount++;
-            db.AudioRecordings.Remove(audio);
-        }
-        await db.SaveChangesAsync(token);
-    }
-    return Results.Ok(new { removedCount, removedBytes, totalSizeBytes = totalBytes, maxStorageBytes = maxBytes });
+        cleanup.RemovedCount,
+        cleanup.RemovedBytes,
+        cleanup.TotalSizeBytes,
+        cleanup.MaxStorageBytes
+    });
+});
+
+app.MapGet("/api/admin/migration/status", (ArchiveMigrationService migration) =>
+    Results.Ok(migration.GetStatus()));
+
+app.MapPost("/api/admin/migration/upload/session", async (
+    MigrationUploadSessionRequest request,
+    MigrationUploadService uploads,
+    CancellationToken token) =>
+{
+    var result = await uploads.CreateOrResumeAsync(request, token);
+    return result.Success ? Results.Ok(result.Status) : Results.BadRequest(new { error = result.Error });
+});
+
+app.MapPut("/api/admin/migration/upload/{sessionId}/chunk", async (
+    string sessionId,
+    string? path,
+    long offset,
+    HttpRequest request,
+    MigrationUploadService uploads,
+    CancellationToken token) =>
+{
+    var result = await uploads.UploadChunkAsync(sessionId, path, offset, request.Body, request.ContentLength, token);
+    if (result.Success) return Results.Ok(result);
+    return result.ExpectedOffset.HasValue
+        ? Results.Conflict(result)
+        : Results.BadRequest(new { error = result.Error });
+});
+
+app.MapPost("/api/admin/migration/upload/{sessionId}/complete", async (
+    string sessionId,
+    MigrationUploadService uploads,
+    CancellationToken token) =>
+{
+    var result = await uploads.CompleteAsync(sessionId, token);
+    return result.Success
+        ? Results.Accepted("/api/admin/migration/status", result.Status)
+        : Results.Conflict(new { error = result.Error });
+});
+
+app.MapPost("/api/admin/migration/start", (MigrationStartRequest request, ArchiveMigrationService migration) =>
+{
+    var result = migration.BeginImport(request.AllowOverCapacity);
+    return result.Started
+        ? Results.Accepted("/api/admin/migration/status", migration.GetStatus())
+        : Results.Conflict(new { error = result.Error });
+});
+
+app.MapPost("/api/admin/migration/cancel", (ArchiveMigrationService migration) =>
+{
+    var result = migration.Cancel();
+    return result.Started
+        ? Results.Accepted("/api/admin/migration/status", migration.GetStatus())
+        : Results.Conflict(new { error = result.Error });
 });
 
 app.Run();
@@ -746,7 +861,7 @@ static string GetAudioStorageRoot(IConfiguration config)
 
 static long GetMaxStorageBytes(IConfiguration config)
 {
-    var maxGb = config.GetValue<double?>("MaxStorageGB") ?? 200;
+    var maxGb = config.GetValue<double?>("MaxStorageGB") ?? 240;
     return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
 }
 
@@ -793,10 +908,122 @@ static async Task<VideoCleanupResult> CleanupVideosAsync(
     }
 }
 
+static async Task<VideoCleanupResult> CleanupAudioAsync(
+    DashcamDbContext db,
+    IConfiguration config,
+    SemaphoreSlim cleanupGate,
+    CancellationToken token)
+{
+    await cleanupGate.WaitAsync(token);
+    try
+    {
+        var maxBytes = GetMaxAudioStorageBytes(config);
+        var totalBytes = await db.AudioRecordings.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
+        var removedCount = 0;
+        var removedBytes = 0L;
+
+        if (totalBytes > maxBytes)
+        {
+            var candidates = await db.AudioRecordings
+                .Where(x => !x.Locked)
+                .OrderBy(x => x.StartTime)
+                .ThenBy(x => x.Id)
+                .ToListAsync(token);
+
+            foreach (var audio in candidates)
+            {
+                if (totalBytes <= maxBytes) break;
+                if (!TryDelete(audio.FilePath)) continue;
+                TryDeleteWaveformCaches(audio.FilePath);
+                totalBytes -= audio.FileSizeBytes;
+                removedBytes += audio.FileSizeBytes;
+                removedCount++;
+                db.AudioRecordings.Remove(audio);
+            }
+
+            await db.SaveChangesAsync(token);
+        }
+
+        return new VideoCleanupResult(removedCount, removedBytes, totalBytes, maxBytes);
+    }
+    finally
+    {
+        cleanupGate.Release();
+    }
+}
+
 static long GetMaxAudioStorageBytes(IConfiguration config)
 {
-    var maxGb = config.GetValue<double?>("MaxAudioStorageGB") ?? 50;
+    var maxGb = config.GetValue<double?>("MaxAudioStorageGB") ?? 10;
     return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
+}
+
+static async Task<Video?> FindExactVideoDuplicateAsync(
+    DashcamDbContext db,
+    string originalFilename,
+    DateTime startTime,
+    DateTime endTime,
+    int durationSeconds,
+    long fileSizeBytes,
+    string uploadedPath,
+    CancellationToken token)
+{
+    var candidates = await db.Videos.AsNoTracking()
+        .Where(x => x.OriginalFilename == originalFilename &&
+            x.StartTime == startTime &&
+            x.EndTime == endTime &&
+            x.DurationSeconds == durationSeconds &&
+            x.FileSizeBytes == fileSizeBytes)
+        .OrderBy(x => x.Id)
+        .ToListAsync(token);
+    return await FindExactDuplicateAsync(candidates, x => x.FilePath, uploadedPath, token);
+}
+
+static async Task<AudioRecording?> FindExactAudioDuplicateAsync(
+    DashcamDbContext db,
+    string originalFilename,
+    DateTime startTime,
+    DateTime endTime,
+    int durationSeconds,
+    long fileSizeBytes,
+    string uploadedPath,
+    CancellationToken token)
+{
+    var candidates = await db.AudioRecordings.AsNoTracking()
+        .Where(x => x.OriginalFilename == originalFilename &&
+            x.StartTime == startTime &&
+            x.EndTime == endTime &&
+            x.DurationSeconds == durationSeconds &&
+            x.FileSizeBytes == fileSizeBytes)
+        .OrderBy(x => x.Id)
+        .ToListAsync(token);
+    return await FindExactDuplicateAsync(candidates, x => x.FilePath, uploadedPath, token);
+}
+
+static async Task<T?> FindExactDuplicateAsync<T>(
+    IReadOnlyCollection<T> candidates,
+    Func<T, string> pathSelector,
+    string uploadedPath,
+    CancellationToken token) where T : class
+{
+    if (candidates.Count == 0) return null;
+    var uploadedInfo = new FileInfo(uploadedPath);
+    byte[]? uploadedHash = null;
+    foreach (var candidate in candidates)
+    {
+        var candidatePath = pathSelector(candidate);
+        if (!File.Exists(candidatePath) || new FileInfo(candidatePath).Length != uploadedInfo.Length) continue;
+        uploadedHash ??= await ComputeSha256Async(uploadedPath, token);
+        var candidateHash = await ComputeSha256Async(candidatePath, token);
+        if (CryptographicOperations.FixedTimeEquals(uploadedHash, candidateHash)) return candidate;
+    }
+    return null;
+}
+
+static async Task<byte[]> ComputeSha256Async(string path, CancellationToken token)
+{
+    await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, true);
+    return await SHA256.HashDataAsync(stream, token);
 }
 
 static bool TryDelete(string path)

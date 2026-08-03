@@ -18,6 +18,14 @@ const formatDate = (value) => new Intl.DateTimeFormat('en-GB', {
   month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
 }).format(new Date(value))
 
+const formatPlaybackTimestamp = (startTime, offsetSeconds = 0) => {
+  const startedAt = new Date(startTime).getTime()
+  if (!Number.isFinite(startedAt)) return '--'
+  const date = new Date(startedAt + Math.max(0, Number(offsetSeconds) || 0) * 1000)
+  const pad = value => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 async function api(path, options) {
   const response = await fetch(`${API}${path}`, options)
   if (!response.ok) {
@@ -25,6 +33,50 @@ async function api(path, options) {
     throw new Error(body.error || `Request failed (${response.status})`)
   }
   return response.status === 204 ? null : response.json()
+}
+
+const supportedMigrationPath = path => {
+  const normalized = path.toLowerCase()
+  return normalized === 'dashcam.db' || normalized === 'dashcam.db-wal' || normalized === 'dashcam.db-shm' ||
+    normalized.startsWith('videos/') && normalized.endsWith('.mp4') ||
+    normalized.startsWith('audio/') && normalized.endsWith('.m4a')
+}
+
+async function folderFingerprint(entries) {
+  const manifest = entries.map(entry => `${entry.path}\t${entry.file.size}\t${entry.file.lastModified}`).join('\n')
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(manifest))
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  }
+  return Array.from({ length: 8 }, (_, salt) => {
+    let hash = (2166136261 ^ salt) >>> 0
+    for (let index = 0; index < manifest.length; index++) hash = Math.imul(hash ^ manifest.charCodeAt(index), 16777619) >>> 0
+    return hash.toString(16).padStart(8, '0')
+  }).join('')
+}
+
+async function prepareMigrationFolder(fileList) {
+  const files = [...fileList]
+  const paths = files.map(file => (file.webkitRelativePath || file.name).replaceAll('\\', '/').replace(/^\/+/, ''))
+  const databaseIndexes = paths.map((path, index) => path.toLowerCase().endsWith('/dashcam.db') || path.toLowerCase() === 'dashcam.db' ? index : -1).filter(index => index >= 0)
+  if (databaseIndexes.length !== 1) throw new Error('Select one folder containing exactly one dashcam.db.')
+  const databasePath = paths[databaseIndexes[0]]
+  const prefix = databasePath.slice(0, -'dashcam.db'.length)
+  const rootParts = prefix.split('/').filter(Boolean)
+  const rootName = rootParts.at(-1) || 'Selected dashcam folder'
+  const entries = files.map((file, index) => ({ file, path: paths[index].startsWith(prefix) ? paths[index].slice(prefix.length) : '' }))
+    .filter(entry => supportedMigrationPath(entry.path))
+    .sort((left, right) => left.path.localeCompare(right.path))
+  if (!entries.some(entry => entry.path.toLowerCase() === 'dashcam.db')) throw new Error('dashcam.db must be inside the selected folder.')
+  if (!entries.some(entry => entry.path.toLowerCase().startsWith('videos/') || entry.path.toLowerCase().startsWith('audio/')))
+    throw new Error('The selected folder does not contain a videos or audio folder.')
+  if (entries.some(entry => entry.file.size <= 0)) throw new Error('The selected folder contains an empty database or media file.')
+  return {
+    rootName,
+    entries,
+    totalBytes: entries.reduce((total, entry) => total + entry.file.size, 0),
+    fingerprint: await folderFingerprint(entries),
+  }
 }
 
 function Icon({ name }) {
@@ -45,7 +97,7 @@ function Icon({ name }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
 }
 
-function RotatedVideo({ src, rotation }) {
+function RotatedVideo({ src, rotation, startTime }) {
   const playerRef = useRef(null)
   const stageRef = useRef(null)
   const videoRef = useRef(null)
@@ -148,6 +200,7 @@ function RotatedVideo({ src, rotation }) {
           <Icon name={playing ? 'pause' : 'play'} />
         </button>
         <span>{formatDuration(Math.floor(currentTime))} / {formatDuration(Math.floor(duration))}</span>
+        <span className="playback-timestamp"><small>Recorded time</small><strong>{formatPlaybackTimestamp(startTime, currentTime)}</strong></span>
         <button type="button" className="playback-control fullscreen-control" onClick={toggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
           <Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} />
         </button>
@@ -257,6 +310,10 @@ function WaveformAudio({ recording }) {
       onLoadedMetadata={event => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : recording.durationSeconds)}
       onTimeUpdate={event => setCurrentTime(event.currentTarget.currentTime)}
     />
+    <div className="audio-playback-time">
+      <span>Recorded time</span>
+      <strong>{formatPlaybackTimestamp(recording.startTime, currentTime)}</strong>
+    </div>
   </div>
 }
 
@@ -399,10 +456,89 @@ function LiveViewer({ device, onClose }) {
   </div>
 }
 
+function MigrationPanel({ migration, busy, folder, upload, onFolderSelected, onUpload, onStart, onCancelUpload, onCancelMigration }) {
+  const inputRef = useRef(null)
+  if (!migration) return null
+  const uploading = upload?.phase === 'uploading' || upload?.phase === 'preparing'
+  const migrationActive = migration.phase === 'scanning' || migration.phase === 'importing'
+  const active = uploading || migrationActive
+  const hasScan = ['ready', 'importing', 'completed'].includes(migration.phase)
+  const noChanges = migration.phase === 'ready' && migration.importVideoCount + migration.importAudioCount === 0
+  const shownPhase = uploading ? 'uploading' : migration.phase
+
+  return <section className="migration-panel">
+    <div className="section-head">
+      <div><p className="eyebrow">DATA MIGRATION</p><h2>Merge another server</h2></div>
+      <span className={`migration-phase ${shownPhase}`}>{shownPhase}</span>
+    </div>
+    <div className="migration-card">
+      <div className="migration-intro">
+        <div><strong>Old server folder</strong><code>{folder?.rootName || 'No folder selected'}</code></div>
+        <p>Choose the folder containing <code>dashcam.db</code>, <code>videos</code>, and <code>audio</code>. Select the same folder again to resume an interrupted upload.</p>
+      </div>
+      <input ref={inputRef} className="migration-folder-input" type="file" webkitdirectory="" directory="" multiple
+        onChange={event => { onFolderSelected(event.target.files); event.target.value = '' }} />
+
+      {folder && !uploading && <div className="migration-selection">
+        <span>{folder.entries.length} supported files</span><strong>{formatBytes(folder.totalBytes)}</strong>
+      </div>}
+
+      {uploading && <div className="migration-progress">
+        <div><span>{upload.message}</span><strong>{upload.progressPercent}%</strong></div>
+        <i><b style={{ width: `${upload.progressPercent}%` }} /></i>
+        <small>{formatBytes(upload.uploadedBytes)} of {formatBytes(upload.totalBytes)}{upload.currentFile ? ` · ${upload.currentFile}` : ''}</small>
+      </div>}
+
+      {!uploading && migrationActive && <div className="migration-progress">
+        <div><span>{migration.message}</span><strong>{migration.progressPercent}%</strong></div>
+        <i><b style={{ width: `${migration.progressPercent}%` }} /></i>
+        <small>{migration.processedItems} of {migration.totalItems || '?'} processed</small>
+      </div>}
+
+      {hasScan && <>
+        <div className="migration-summary">
+          <article><span>Old videos</span><strong>{migration.sourceVideoCount}</strong><small>{formatBytes(migration.sourceVideoBytes)}</small></article>
+          <article><span>Old audio</span><strong>{migration.sourceAudioCount}</strong><small>{formatBytes(migration.sourceAudioBytes)}</small></article>
+          <article><span>Will import</span><strong>{migration.importVideoCount + migration.importAudioCount}</strong><small>{formatBytes(migration.importBytes)}</small></article>
+          <article><span>Duplicates</span><strong>{migration.duplicateVideos + migration.duplicateAudio}</strong><small>Skipped safely</small></article>
+        </div>
+        <div className="migration-projection">
+          <span>After merge: video {formatBytes(migration.projectedVideoBytes)} / {formatBytes(migration.maxVideoBytes)}</span>
+          <span>audio {formatBytes(migration.projectedAudioBytes)} / {formatBytes(migration.maxAudioBytes)}</span>
+          <span>disk available {formatBytes(migration.availableDiskSpaceBytes)}</span>
+        </div>
+      </>}
+
+      {migration.requiresCapacityConfirmation && migration.phase === 'ready' && <div className="migration-warning">
+        This merge exceeds a configured archive limit. The next phone upload may delete the oldest unlocked recordings.
+      </div>}
+      {migration.missingFiles > 0 && <div className="migration-warning danger">
+        {migration.missingFiles} referenced file(s) are missing or have the wrong size. Select the complete old server folder and upload it again.
+        {migration.missingFileExamples?.length > 0 && <small>{migration.missingFileExamples.join(' | ')}</small>}
+      </div>}
+      {migration.error && <div className="migration-warning danger">{migration.error}</div>}
+      {migration.phase === 'completed' && <div className="migration-success">{migration.message}{migration.backupPath && <small>Database backup: {migration.backupPath}</small>}</div>}
+      {upload?.phase === 'paused' && <div className="migration-warning">{upload.message || 'Upload paused.'} Select the same folder to resume.</div>}
+
+      <div className="migration-actions">
+        {!active && <button onClick={() => inputRef.current?.click()} disabled={busy}>Choose folder</button>}
+        {!active && folder && <button className="primary" onClick={onUpload} disabled={busy}>Upload and scan</button>}
+        {migration.phase === 'ready' && <button className="primary" onClick={onStart} disabled={busy || migration.missingFiles > 0 || noChanges}>Start merge</button>}
+        {uploading && <button className="danger" onClick={onCancelUpload}>Pause upload</button>}
+        {!uploading && migrationActive && <button className="danger" onClick={onCancelMigration} disabled={busy}>Cancel</button>}
+        {noChanges && <span>Everything in the selected folder is already in this archive.</span>}
+      </div>
+    </div>
+  </section>
+}
+
 export default function App() {
   const [videos, setVideos] = useState([])
   const [audio, setAudio] = useState([])
   const [storage, setStorage] = useState(null)
+  const [migration, setMigration] = useState(null)
+  const [migrationFolder, setMigrationFolder] = useState(null)
+  const [migrationUpload, setMigrationUpload] = useState(null)
   const [devices, setDevices] = useState([])
   const [online, setOnline] = useState(null)
   const [selected, setSelected] = useState(null)
@@ -413,44 +549,73 @@ export default function App() {
   const [error, setError] = useState('')
   const [date, setDate] = useState('')
   const [lockFilter, setLockFilter] = useState('all')
+  const [videoPage, setVideoPage] = useState(1)
+  const [audioPage, setAudioPage] = useState(1)
+  const [videoTotal, setVideoTotal] = useState(0)
+  const [audioTotal, setAudioTotal] = useState(0)
   const [selectedVideoIds, setSelectedVideoIds] = useState(() => new Set())
   const [selectedAudioIds, setSelectedAudioIds] = useState(() => new Set())
   const [bulkRotation, setBulkRotation] = useState(90)
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [migrationBusy, setMigrationBusy] = useState(false)
+  const migrationUploadAbort = useRef(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const params = new URLSearchParams({ page: '1', pageSize: '200' })
-      if (date) params.set('date', date)
-      if (lockFilter !== 'all') params.set('locked', lockFilter)
-      const [health, list, audioList, status, deviceList] = await Promise.all([
-        api('/api/health'), api(`/api/videos?${params}`), api(`/api/audio?${params}`),
-        api('/api/storage/status'), api('/api/devices'),
+      const videoParams = new URLSearchParams({ page: String(videoPage), pageSize: '200' })
+      const audioParams = new URLSearchParams({ page: String(audioPage), pageSize: '200' })
+      if (date) {
+        videoParams.set('date', date)
+        audioParams.set('date', date)
+      }
+      if (lockFilter !== 'all') {
+        videoParams.set('locked', lockFilter)
+        audioParams.set('locked', lockFilter)
+      }
+      const [health, list, audioList, status, deviceList, migrationStatus] = await Promise.all([
+        api('/api/health'), api(`/api/videos?${videoParams}`), api(`/api/audio?${audioParams}`),
+        api('/api/storage/status'), api('/api/devices'), api('/api/admin/migration/status'),
       ])
       setOnline(health.status === 'ok')
       setVideos(list.items)
       setAudio(audioList.items)
+      setVideoTotal(list.totalCount)
+      setAudioTotal(audioList.totalCount)
       setSelectedVideoIds(current => new Set([...current].filter(id => list.items.some(item => item.id === id))))
       setSelectedAudioIds(current => new Set([...current].filter(id => audioList.items.some(item => item.id === id))))
       setStorage(status)
       setDevices(deviceList.items)
+      setMigration(migrationStatus)
     } catch (err) {
       setOnline(false)
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [date, lockFilter])
+  }, [date, lockFilter, videoPage, audioPage])
 
   useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    setVideoPage(page => Math.min(page, Math.max(1, Math.ceil(videoTotal / 200))))
+  }, [videoTotal])
+  useEffect(() => {
+    setAudioPage(page => Math.min(page, Math.max(1, Math.ceil(audioTotal / 200))))
+  }, [audioTotal])
   useEffect(() => {
     const interval = window.setInterval(() => {
       api('/api/devices').then(result => setDevices(result.items)).catch(() => {})
     }, 5_000)
     return () => window.clearInterval(interval)
   }, [])
+  useEffect(() => {
+    if (!migration || !['scanning', 'importing'].includes(migration.phase)) return undefined
+    const interval = window.setInterval(() => {
+      api('/api/admin/migration/status').then(setMigration).catch(() => {})
+    }, 1_000)
+    return () => window.clearInterval(interval)
+  }, [migration?.phase])
 
   const storagePercent = useMemo(() => storage
     ? Math.min(100, storage.totalSizeBytes / storage.maxStorageBytes * 100) : 0, [storage])
@@ -618,10 +783,133 @@ export default function App() {
     finally { setBulkBusy(false) }
   }
 
+  const selectMigrationFolder = async (fileList) => {
+    if (!fileList?.length) return
+    setMigrationBusy(true)
+    setError('')
+    try {
+      const selectedFolder = await prepareMigrationFolder(fileList)
+      setMigrationFolder(selectedFolder)
+      setMigrationUpload(null)
+    } catch (err) { setError(err.message) }
+    finally { setMigrationBusy(false) }
+  }
+
+  const uploadMigrationFolder = async () => {
+    if (!migrationFolder) return
+    const controller = new AbortController()
+    migrationUploadAbort.current = controller
+    setMigrationBusy(true)
+    setError('')
+    try {
+      setMigrationUpload({ phase: 'preparing', message: 'Preparing resumable upload...', progressPercent: 0, uploadedBytes: 0, totalBytes: migrationFolder.totalBytes })
+      const session = await api('/api/admin/migration/upload/session', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify({
+          fingerprint: migrationFolder.fingerprint,
+          rootName: migrationFolder.rootName,
+          files: migrationFolder.entries.map(entry => ({ path: entry.path, size: entry.file.size, lastModified: entry.file.lastModified })),
+        }),
+      })
+      const serverFiles = new Map(session.files.map(file => [file.path.toLowerCase(), file]))
+      let uploadedBytes = session.uploadedBytes
+      setMigrationUpload({
+        phase: 'uploading', message: 'Uploading selected folder...',
+        progressPercent: Math.round(uploadedBytes / session.totalBytes * 100),
+        uploadedBytes, totalBytes: session.totalBytes,
+      })
+
+      for (const entry of migrationFolder.entries) {
+        const serverFile = serverFiles.get(entry.path.toLowerCase())
+        let offset = serverFile?.uploadedBytes || 0
+        while (offset < entry.file.size) {
+          const end = Math.min(offset + session.chunkSizeBytes, entry.file.size)
+          const result = await api(`/api/admin/migration/upload/${session.sessionId}/chunk?path=${encodeURIComponent(entry.path)}&offset=${offset}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' },
+            body: entry.file.slice(offset, end), signal: controller.signal,
+          })
+          uploadedBytes += result.uploadedBytes - offset
+          offset = result.uploadedBytes
+          setMigrationUpload({
+            phase: 'uploading', message: 'Uploading selected folder...',
+            progressPercent: Math.min(100, Math.round(uploadedBytes / session.totalBytes * 100)),
+            uploadedBytes, totalBytes: session.totalBytes, currentFile: entry.path,
+          })
+        }
+      }
+
+      const migrationStatus = await api(`/api/admin/migration/upload/${session.sessionId}/complete`, {
+        method: 'POST', signal: controller.signal,
+      })
+      setMigration(migrationStatus)
+      setMigrationUpload({
+        phase: 'complete', message: 'Upload complete. Scanning data...', progressPercent: 100,
+        uploadedBytes: session.totalBytes, totalBytes: session.totalBytes,
+      })
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        setMigrationUpload(current => ({ ...current, phase: 'paused', message: 'Upload paused.' }))
+      } else {
+        setMigrationUpload(current => current ? { ...current, phase: 'paused', message: err.message } : null)
+        setError(err.message)
+      }
+    } finally {
+      if (migrationUploadAbort.current === controller) migrationUploadAbort.current = null
+      setMigrationBusy(false)
+    }
+  }
+
+  const cancelMigrationUpload = () => migrationUploadAbort.current?.abort()
+
+  const startMigration = async () => {
+    const overCapacity = migration?.requiresCapacityConfirmation
+    const message = overCapacity
+      ? 'This merge exceeds an archive limit. The next upload may delete the oldest unlocked recordings. Continue?'
+      : `Merge ${migration?.importVideoCount || 0} video(s) and ${migration?.importAudioCount || 0} audio recording(s)?`
+    if (!window.confirm(message)) return
+    setMigrationBusy(true)
+    setError('')
+    try {
+      setMigration(await api('/api/admin/migration/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowOverCapacity: Boolean(overCapacity) }),
+      }))
+    } catch (err) { setError(err.message) }
+    finally { setMigrationBusy(false) }
+  }
+
+  const cancelMigration = async () => {
+    if (!window.confirm('Cancel the current migration job?')) return
+    setMigrationBusy(true)
+    try {
+      setMigration(await api('/api/admin/migration/cancel', { method: 'POST' }))
+    } catch (err) { setError(err.message) }
+    finally { setMigrationBusy(false) }
+  }
+
   const selectedIds = archiveType === 'video' ? selectedVideoIds : selectedAudioIds
   const setSelectedIds = archiveType === 'video' ? setSelectedVideoIds : setSelectedAudioIds
   const visibleItems = archiveType === 'video' ? videos : audio
   const allVisibleSelected = visibleItems.length > 0 && visibleItems.every(item => selectedIds.has(item.id))
+  const pageSize = 200
+  const currentPage = archiveType === 'video' ? videoPage : audioPage
+  const setCurrentPage = archiveType === 'video' ? setVideoPage : setAudioPage
+  const currentTotal = archiveType === 'video' ? videoTotal : audioTotal
+  const totalPages = Math.max(1, Math.ceil(currentTotal / pageSize))
+  const rangeStart = currentTotal === 0 ? 0 : (currentPage - 1) * pageSize + 1
+  const rangeEnd = Math.min(currentPage * pageSize, currentTotal)
+
+  const changeDate = (value) => {
+    setVideoPage(1)
+    setAudioPage(1)
+    setDate(value)
+  }
+
+  const changeLockFilter = (value) => {
+    setVideoPage(1)
+    setAudioPage(1)
+    setLockFilter(value)
+  }
 
   return <div className="shell">
     <header>
@@ -639,12 +927,16 @@ export default function App() {
 
       <section className="metrics">
         <article><span>Total videos</span><strong>{storage?.totalVideoCount ?? '-'}</strong><small>Archived clips</small></article>
-        <article><span>Video storage</span><strong>{storage ? formatBytes(storage.totalSizeBytes) : '-'}</strong><small>{storagePercent.toFixed(1)}% of {storage ? formatBytes(storage.maxStorageBytes) : '-'}</small></article>
+        <article className="capacity"><span>Video storage</span><strong>{storage ? formatBytes(storage.totalSizeBytes) : '-'}</strong><div><i style={{ width: `${storagePercent}%` }} /></div><small>{storagePercent.toFixed(1)}% of {storage ? formatBytes(storage.maxStorageBytes) : '-'}</small></article>
         <article><span>Total audio</span><strong>{storage?.totalAudioCount ?? '-'}</strong><small>Archived recordings</small></article>
         <article className="capacity"><span>Audio storage</span><strong>{storage ? formatBytes(storage.totalAudioSizeBytes) : '-'}</strong><div><i style={{ width: `${audioStoragePercent}%` }} /></div><small>{audioStoragePercent.toFixed(1)}% of {storage ? formatBytes(storage.maxAudioStorageBytes) : '-'}</small></article>
       </section>
 
       {error && <div className="error">{error}</div>}
+
+      <MigrationPanel migration={migration} busy={migrationBusy} folder={migrationFolder} upload={migrationUpload}
+        onFolderSelected={selectMigrationFolder} onUpload={uploadMigrationFolder} onStart={startMigration}
+        onCancelUpload={cancelMigrationUpload} onCancelMigration={cancelMigration} />
 
       <section className="devices">
         <div className="section-head">
@@ -682,8 +974,8 @@ export default function App() {
           <button className={archiveType === 'audio' ? 'active' : ''} onClick={() => setArchiveType('audio')}>Audio</button>
         </div>
         <div className="section-head"><div><p className="eyebrow">{archiveType === 'video' ? 'VIDEO ARCHIVE' : 'AUDIO ARCHIVE'}</p><h2>{archiveType === 'video' ? 'Video recordings' : 'Audio recordings'}</h2></div><div className="filters">
-          <input type="date" value={date} onChange={e => setDate(e.target.value)} aria-label="Filter by date" />
-          <select value={lockFilter} onChange={e => setLockFilter(e.target.value)} aria-label="Filter by lock status">
+          <input type="date" value={date} onChange={e => changeDate(e.target.value)} aria-label="Filter by date" />
+          <select value={lockFilter} onChange={e => changeLockFilter(e.target.value)} aria-label="Filter by lock status">
             <option value="all">All statuses</option><option value="true">Locked</option><option value="false">Unlocked</option>
           </select>
         </div></div>
@@ -736,17 +1028,25 @@ export default function App() {
           {!loading && audio.length === 0 && <div className="empty"><span>00:00</span><h3>No audio yet</h3><p>Audio recordings will appear here after the phone completes its first upload.</p></div>}
           {loading && <div className="empty"><div className="spinner" /><p>Loading audio library...</p></div>}
         </div>}
+        {!loading && currentTotal > 0 && <nav className="pagination" aria-label={`${archiveType} archive pages`}>
+          <span>Showing {rangeStart}-{rangeEnd} of {currentTotal}</span>
+          <div>
+            <button onClick={() => setCurrentPage(page => Math.max(1, page - 1))} disabled={currentPage <= 1}>Previous</button>
+            <strong>Page {currentPage} of {totalPages}</strong>
+            <button onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))} disabled={currentPage >= totalPages}>Next</button>
+          </div>
+        </nav>}
       </section>
     </main>
 
     {selected && <div className="modal" onMouseDown={() => setSelected(null)}><div className="player" onMouseDown={e => e.stopPropagation()}>
       <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button className="rotate-control" title="Rotate playback clockwise by 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /><span>Rotate 90 deg</span></button><button className="close-player" aria-label="Close player" onClick={() => setSelected(null)}>X</button></span></div>
-      <RotatedVideo src={`${API}/api/videos/${selected.id}/stream`} rotation={selected.playbackRotationDegrees || 0} />
+      <RotatedVideo key={selected.id} src={`${API}/api/videos/${selected.id}/stream`} rotation={selected.playbackRotationDegrees || 0} startTime={selected.startTime} />
       <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)} | Playback {selected.playbackRotationDegrees || 0} deg</p>
     </div></div>}
     {selectedAudio && <div className="modal" onMouseDown={() => setSelectedAudio(null)}><div className="player audio-player-modal" onMouseDown={e => e.stopPropagation()}>
       <div><strong>{selectedAudio.originalFilename || selectedAudio.filename}</strong><button className="close-player" aria-label="Close player" onClick={() => setSelectedAudio(null)}>X</button></div>
-      <WaveformAudio recording={selectedAudio} />
+      <WaveformAudio key={selectedAudio.id} recording={selectedAudio} />
       <p>{formatDate(selectedAudio.startTime)} | {formatDuration(selectedAudio.durationSeconds)} | {formatBytes(selectedAudio.fileSizeBytes)}</p>
     </div></div>}
     {liveDevice && <LiveViewer device={liveDevice} onClose={() => stopLive(liveDevice.deviceId)} />}
