@@ -841,10 +841,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleAudioPlayback(file: File) {
-        if (audioRecordingActive || PowerRecordingSettings.isAudioRecordingActive(this)) {
-            toast("Stop audio recording before playback")
-            return
-        }
         val currentPlayer = audioPlayer
         if (playingAudioPath == file.absolutePath && currentPlayer != null) {
             try {
