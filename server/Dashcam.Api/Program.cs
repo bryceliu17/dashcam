@@ -24,6 +24,7 @@ builder.Services.Configure<FormOptions>(options =>
 
 var app = builder.Build();
 app.UseCors();
+var videoCleanupGate = new SemaphoreSlim(1, 1);
 
 await using (var scope = app.Services.CreateAsyncScope())
 {
@@ -211,6 +212,7 @@ app.MapPost("/api/videos/upload", async (
     HttpRequest request,
     DashcamDbContext db,
     IConfiguration configuration,
+    ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
     if (!request.HasFormContentType)
@@ -277,6 +279,19 @@ app.MapPost("/api/videos/upload", async (
         };
         db.Videos.Add(video);
         await db.SaveChangesAsync(cancellationToken);
+
+        try
+        {
+            await CleanupVideosAsync(db, configuration, videoCleanupGate, CancellationToken.None);
+        }
+        catch (Exception cleanupError)
+        {
+            loggerFactory.CreateLogger("Dashcam.VideoCleanup").LogError(
+                cleanupError,
+                "Automatic video cleanup failed after uploading video {VideoId}",
+                video.Id);
+        }
+
         return Results.Created($"/api/videos/{video.Id}", ToResponse(video));
     }
     catch
@@ -663,27 +678,14 @@ app.MapGet("/api/storage/status", async (DashcamDbContext db, IConfiguration con
 
 app.MapPost("/api/videos/cleanup", async (DashcamDbContext db, IConfiguration config, CancellationToken token) =>
 {
-    var maxBytes = GetMaxStorageBytes(config);
-    var totalBytes = await db.Videos.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
-    var removedCount = 0;
-    var removedBytes = 0L;
-
-    if (totalBytes > maxBytes)
+    var cleanup = await CleanupVideosAsync(db, config, videoCleanupGate, token);
+    return Results.Ok(new
     {
-        var candidates = await db.Videos.Where(x => !x.Locked)
-            .OrderBy(x => x.StartTime).ToListAsync(token);
-        foreach (var video in candidates)
-        {
-            if (totalBytes <= maxBytes) break;
-            if (!TryDelete(video.FilePath)) continue;
-            totalBytes -= video.FileSizeBytes;
-            removedBytes += video.FileSizeBytes;
-            removedCount++;
-            db.Videos.Remove(video);
-        }
-        await db.SaveChangesAsync(token);
-    }
-    return Results.Ok(new { removedCount, removedBytes, totalSizeBytes = totalBytes, maxStorageBytes = maxBytes });
+        cleanup.RemovedCount,
+        cleanup.RemovedBytes,
+        cleanup.TotalSizeBytes,
+        cleanup.MaxStorageBytes
+    });
 });
 
 app.MapPost("/api/audio/cleanup", async (DashcamDbContext db, IConfiguration config, CancellationToken token) =>
@@ -746,6 +748,49 @@ static long GetMaxStorageBytes(IConfiguration config)
 {
     var maxGb = config.GetValue<double?>("MaxStorageGB") ?? 200;
     return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
+}
+
+static async Task<VideoCleanupResult> CleanupVideosAsync(
+    DashcamDbContext db,
+    IConfiguration config,
+    SemaphoreSlim cleanupGate,
+    CancellationToken token)
+{
+    await cleanupGate.WaitAsync(token);
+    try
+    {
+        var maxBytes = GetMaxStorageBytes(config);
+        var totalBytes = await db.Videos.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
+        var removedCount = 0;
+        var removedBytes = 0L;
+
+        if (totalBytes > maxBytes)
+        {
+            var candidates = await db.Videos
+                .Where(x => !x.Locked)
+                .OrderBy(x => x.StartTime)
+                .ThenBy(x => x.Id)
+                .ToListAsync(token);
+
+            foreach (var video in candidates)
+            {
+                if (totalBytes <= maxBytes) break;
+                if (!TryDelete(video.FilePath)) continue;
+                totalBytes -= video.FileSizeBytes;
+                removedBytes += video.FileSizeBytes;
+                removedCount++;
+                db.Videos.Remove(video);
+            }
+
+            await db.SaveChangesAsync(token);
+        }
+
+        return new VideoCleanupResult(removedCount, removedBytes, totalBytes, maxBytes);
+    }
+    finally
+    {
+        cleanupGate.Release();
+    }
 }
 
 static long GetMaxAudioStorageBytes(IConfiguration config)
@@ -1017,6 +1062,11 @@ public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
+public sealed record VideoCleanupResult(
+    int RemovedCount,
+    long RemovedBytes,
+    long TotalSizeBytes,
+    long MaxStorageBytes);
 public sealed record DeviceHeartbeatRequest(
     string? DeviceId,
     string? DeviceName,

@@ -241,10 +241,10 @@ Switch back to the current branch with `git switch main` before building the mai
 - Video playback rotation saved on the server.
 - Audio waveform generation and caching through `ffmpeg`; the first waveform load can take a few seconds.
 - Lock/unlock and explicit deletion for both media types.
-- Storage totals and manual cleanup endpoints.
+- Storage totals, automatic video cleanup after uploads, and manual cleanup endpoints.
 - UTC API timestamps rendered in the browser's local time zone.
 
-Server storage cleanup removes oldest unlocked files until the configured server limit is met. It is invoked through the cleanup endpoints/dashboard; it is separate from phone storage rotation.
+After each successful video upload, server storage cleanup removes the oldest unlocked videos until the configured video limit is met. The cleanup endpoints remain available for manual video or audio cleanup; server cleanup is separate from phone storage rotation.
 
 ### API summary
 
