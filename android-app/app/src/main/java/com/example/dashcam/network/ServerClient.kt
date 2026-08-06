@@ -24,6 +24,7 @@ data class DeviceHeartbeat(
     val model: String,
     val androidVersion: String,
     val appVersion: String,
+    val ipAddress: String,
     val batteryLevel: Int,
     val isCharging: Boolean,
     val chargingSource: String,
@@ -129,6 +130,7 @@ class ServerClient(private val baseUrl: String) {
             .put("model", status.model)
             .put("androidVersion", status.androidVersion)
             .put("appVersion", status.appVersion)
+            .put("ipAddress", status.ipAddress)
             .put("batteryLevel", status.batteryLevel)
             .put("isCharging", status.isCharging)
             .put("chargingSource", status.chargingSource)
