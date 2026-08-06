@@ -35,6 +35,7 @@ public sealed class DashcamDbContext(DbContextOptions<DashcamDbContext> options)
         device.Property(x => x.Model).HasMaxLength(120).IsRequired();
         device.Property(x => x.AndroidVersion).HasMaxLength(80).IsRequired();
         device.Property(x => x.AppVersion).HasMaxLength(40).IsRequired();
+        device.Property(x => x.IpAddress).HasMaxLength(45).IsRequired();
         device.Property(x => x.ChargingSource).HasMaxLength(32).IsRequired();
         device.Property(x => x.LiveError).HasMaxLength(500).IsRequired();
         device.HasIndex(x => x.LastSeenAt);

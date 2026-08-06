@@ -8,6 +8,7 @@ public sealed class DeviceStatus
     public required string Model { get; set; }
     public required string AndroidVersion { get; set; }
     public required string AppVersion { get; set; }
+    public required string IpAddress { get; set; }
     public int BatteryLevel { get; set; }
     public bool IsCharging { get; set; }
     public required string ChargingSource { get; set; }

@@ -81,6 +81,7 @@ app.MapGet("/api/health", () => Results.Ok(new
 
 app.MapPost("/api/devices/heartbeat", async (
     DeviceHeartbeatRequest request,
+    HttpContext httpContext,
     DashcamDbContext db,
     LiveFrameStore liveFrames,
     CancellationToken cancellationToken) =>
@@ -91,6 +92,9 @@ app.MapPost("/api/devices/heartbeat", async (
         return Results.BadRequest(new { error = "deviceId, deviceName and a batteryLevel from 0 to 100 are required." });
 
     var now = DateTime.UtcNow;
+    var ipAddress = NormalizeIpAddress(request.IpAddress)
+        ?? NormalizeIpAddress(httpContext.Connection.RemoteIpAddress?.ToString())
+        ?? string.Empty;
     var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
     if (device is null)
     {
@@ -102,6 +106,7 @@ app.MapPost("/api/devices/heartbeat", async (
             Model = CleanOptionalText(request.Model, 120),
             AndroidVersion = CleanOptionalText(request.AndroidVersion, 80),
             AppVersion = CleanOptionalText(request.AppVersion, 40),
+            IpAddress = ipAddress,
             BatteryLevel = request.BatteryLevel,
             IsCharging = request.IsCharging,
             ChargingSource = CleanOptionalText(request.ChargingSource, 32),
@@ -124,6 +129,7 @@ app.MapPost("/api/devices/heartbeat", async (
         device.Model = CleanOptionalText(request.Model, 120);
         device.AndroidVersion = CleanOptionalText(request.AndroidVersion, 80);
         device.AppVersion = CleanOptionalText(request.AppVersion, 40);
+        device.IpAddress = ipAddress;
         device.BatteryLevel = request.BatteryLevel;
         device.IsCharging = request.IsCharging;
         device.ChargingSource = CleanOptionalText(request.ChargingSource, 32);
@@ -451,6 +457,7 @@ app.MapPost("/api/audio/upload", async (
 app.MapGet("/api/videos", async (
     DateOnly? date,
     bool? locked,
+    int timezoneOffsetMinutes,
     int page,
     int pageSize,
     DashcamDbContext db,
@@ -461,22 +468,27 @@ app.MapGet("/api/videos", async (
     var query = db.Videos.AsNoTracking();
     if (date.HasValue)
     {
-        var from = date.Value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        timezoneOffsetMinutes = Math.Clamp(timezoneOffsetMinutes, -14 * 60, 14 * 60);
+        var from = DateTime.SpecifyKind(
+            date.Value.ToDateTime(TimeOnly.MinValue).AddMinutes(timezoneOffsetMinutes),
+            DateTimeKind.Utc);
         var to = from.AddDays(1);
         query = query.Where(x => x.StartTime >= from && x.StartTime < to);
     }
     if (locked.HasValue) query = query.Where(x => x.Locked == locked.Value);
     var totalCount = await query.CountAsync(cancellationToken);
+    var totalDurationSeconds = await query.SumAsync(x => (long)x.DurationSeconds, cancellationToken);
     var rows = await query.OrderByDescending(x => x.StartTime)
         .Skip((page - 1) * pageSize).Take(pageSize)
         .ToListAsync(cancellationToken);
     var videos = rows.Select(ToResponse).ToList();
-    return Results.Ok(new { items = videos, page, pageSize, totalCount });
+    return Results.Ok(new { items = videos, page, pageSize, totalCount, totalDurationSeconds });
 });
 
 app.MapGet("/api/audio", async (
     DateOnly? date,
     bool? locked,
+    int timezoneOffsetMinutes,
     int page,
     int pageSize,
     DashcamDbContext db,
@@ -487,16 +499,62 @@ app.MapGet("/api/audio", async (
     var query = db.AudioRecordings.AsNoTracking();
     if (date.HasValue)
     {
-        var from = date.Value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        timezoneOffsetMinutes = Math.Clamp(timezoneOffsetMinutes, -14 * 60, 14 * 60);
+        var from = DateTime.SpecifyKind(
+            date.Value.ToDateTime(TimeOnly.MinValue).AddMinutes(timezoneOffsetMinutes),
+            DateTimeKind.Utc);
         var to = from.AddDays(1);
         query = query.Where(x => x.StartTime >= from && x.StartTime < to);
     }
     if (locked.HasValue) query = query.Where(x => x.Locked == locked.Value);
     var totalCount = await query.CountAsync(cancellationToken);
+    var totalDurationSeconds = await query.SumAsync(x => (long)x.DurationSeconds, cancellationToken);
     var rows = await query.OrderByDescending(x => x.StartTime)
         .Skip((page - 1) * pageSize).Take(pageSize)
         .ToListAsync(cancellationToken);
-    return Results.Ok(new { items = rows.Select(ToAudioResponse).ToList(), page, pageSize, totalCount });
+    return Results.Ok(new { items = rows.Select(ToAudioResponse).ToList(), page, pageSize, totalCount, totalDurationSeconds });
+});
+
+app.MapGet("/api/archive/dates", async (
+    string type,
+    int year,
+    int month,
+    int timezoneOffsetMinutes,
+    bool? locked,
+    DashcamDbContext db,
+    CancellationToken cancellationToken) =>
+{
+    if (year < 2000 || year > 9999 || month < 1 || month > 12)
+        return Results.BadRequest(new { error = "A valid year and month are required." });
+
+    timezoneOffsetMinutes = Math.Clamp(timezoneOffsetMinutes, -14 * 60, 14 * 60);
+    var from = DateTime.SpecifyKind(
+        new DateTime(year, month, 1).AddMinutes(timezoneOffsetMinutes),
+        DateTimeKind.Utc);
+    var to = from.AddMonths(1);
+    List<DateTime> timestamps;
+
+    if (string.Equals(type, "video", StringComparison.OrdinalIgnoreCase))
+    {
+        var query = db.Videos.AsNoTracking().Where(x => x.StartTime >= from && x.StartTime < to);
+        if (locked.HasValue) query = query.Where(x => x.Locked == locked.Value);
+        timestamps = await query.Select(x => x.StartTime).ToListAsync(cancellationToken);
+    }
+    else if (string.Equals(type, "audio", StringComparison.OrdinalIgnoreCase))
+    {
+        var query = db.AudioRecordings.AsNoTracking().Where(x => x.StartTime >= from && x.StartTime < to);
+        if (locked.HasValue) query = query.Where(x => x.Locked == locked.Value);
+        timestamps = await query.Select(x => x.StartTime).ToListAsync(cancellationToken);
+    }
+    else
+    {
+        return Results.BadRequest(new { error = "type must be video or audio." });
+    }
+
+    var dates = timestamps
+        .Select(timestamp => DateOnly.FromDateTime(timestamp.AddMinutes(-timezoneOffsetMinutes)))
+        .Distinct().OrderBy(x => x).Select(x => x.ToString("yyyy-MM-dd"));
+    return Results.Ok(new { dates });
 });
 
 app.MapGet("/api/audio/{id:int}/stream", async (int id, DashcamDbContext db, CancellationToken token) =>
@@ -1094,6 +1152,7 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
             Model TEXT NOT NULL,
             AndroidVersion TEXT NOT NULL,
             AppVersion TEXT NOT NULL,
+            IpAddress TEXT NOT NULL DEFAULT '',
             BatteryLevel INTEGER NOT NULL,
             IsCharging INTEGER NOT NULL,
             ChargingSource TEXT NOT NULL,
@@ -1111,6 +1170,7 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
     await db.Database.ExecuteSqlRawAsync(
         "CREATE INDEX IF NOT EXISTS IX_DeviceStatuses_LastSeenAt ON DeviceStatuses (LastSeenAt)");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveAccessEnabled", "INTEGER NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "DeviceStatuses", "IpAddress", "TEXT NOT NULL DEFAULT ''");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveRequested", "INTEGER NOT NULL DEFAULT 0");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveStreaming", "INTEGER NOT NULL DEFAULT 0");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveError", "TEXT NOT NULL DEFAULT ''");
@@ -1241,6 +1301,7 @@ static object ToDeviceResponse(DeviceStatus device, DateTime now) => new
     device.Model,
     device.AndroidVersion,
     device.AppVersion,
+    device.IpAddress,
     device.BatteryLevel,
     device.IsCharging,
     device.ChargingSource,
@@ -1267,6 +1328,12 @@ static string CleanOptionalText(string? value, int maxLength)
 {
     var cleaned = value?.Trim() ?? string.Empty;
     return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength];
+}
+
+static string? NormalizeIpAddress(string? value)
+{
+    if (!System.Net.IPAddress.TryParse(value?.Trim(), out var address)) return null;
+    return address.IsIPv4MappedToIPv6 ? address.MapToIPv4().ToString() : address.ToString();
 }
 
 static DateTime AsUtc(DateTime value) => value.Kind switch
@@ -1301,6 +1368,7 @@ public sealed record DeviceHeartbeatRequest(
     string? Model,
     string? AndroidVersion,
     string? AppVersion,
+    string? IpAddress,
     int BatteryLevel,
     bool IsCharging,
     string? ChargingSource,

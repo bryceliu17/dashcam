@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { DayPicker } from '@daypicker/react'
 
 const API = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -14,6 +15,13 @@ const formatDuration = (seconds = 0) => {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
+const formatTotalDuration = (seconds = 0) => {
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor(seconds % 3600 / 60)
+  const remainingSeconds = seconds % 60
+  return hours > 0 ? `${hours}h ${minutes}m ${remainingSeconds}s` : `${minutes}m ${remainingSeconds}s`
+}
+
 const formatDate = (value) => new Intl.DateTimeFormat('en-GB', {
   month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
 }).format(new Date(value))
@@ -24,6 +32,16 @@ const formatPlaybackTimestamp = (startTime, offsetSeconds = 0) => {
   const date = new Date(startedAt + Math.max(0, Number(offsetSeconds) || 0) * 1000)
   const pad = value => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+const toDateInput = date => {
+  const pad = value => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+const fromDateInput = value => {
+  const [year, month, day] = value.split('-').map(Number)
+  return year && month && day ? new Date(year, month - 1, day) : undefined
 }
 
 async function api(path, options) {
@@ -93,8 +111,97 @@ function Icon({ name }) {
     stop: <rect x="7" y="7" width="10" height="10" rx="1"/>,
     fullscreen: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></>,
+    calendar: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></>,
+    close: <path d="M6 6l12 12M18 6 6 18"/>,
+    chevronLeft: <path d="m15 18-6-6 6-6"/>,
+    chevronRight: <path d="m9 18 6-6-6-6"/>,
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
+}
+
+function ArchiveDatePicker({ value, onChange, archiveType, lockFilter }) {
+  const rootRef = useRef(null)
+  const selected = value ? fromDateInput(value) : undefined
+  const [open, setOpen] = useState(false)
+  const [month, setMonth] = useState(() => selected || new Date())
+  const [availableDates, setAvailableDates] = useState([])
+
+  useEffect(() => {
+    if (!open) return undefined
+    const controller = new AbortController()
+    const params = new URLSearchParams({
+      type: archiveType,
+      year: String(month.getFullYear()),
+      month: String(month.getMonth() + 1),
+      timezoneOffsetMinutes: String(new Date().getTimezoneOffset()),
+    })
+    if (lockFilter !== 'all') params.set('locked', lockFilter)
+    setAvailableDates([])
+    api(`/api/archive/dates?${params}`, { signal: controller.signal })
+      .then(result => setAvailableDates(result.dates.map(fromDateInput)))
+      .catch(error => { if (error.name !== 'AbortError') setAvailableDates([]) })
+    return () => controller.abort()
+  }, [open, month, archiveType, lockFilter])
+
+  useEffect(() => {
+    if (!open) return undefined
+    const close = event => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false)
+    }
+    const closeOnEscape = event => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', close)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', close)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  const toggle = () => {
+    if (!open) setMonth(selected || new Date())
+    setOpen(current => !current)
+  }
+
+  const selectDate = day => {
+    if (!day) return
+    onChange(toDateInput(day))
+    setOpen(false)
+  }
+
+  const moveDate = days => {
+    if (!selected) return
+    const next = new Date(selected)
+    next.setDate(next.getDate() + days)
+    setMonth(next)
+    onChange(toDateInput(next))
+  }
+
+  const displayValue = selected
+    ? new Intl.DateTimeFormat('en-GB', { weekday: 'long', day: '2-digit', month: 'short', year: 'numeric' }).format(selected)
+    : 'All dates'
+
+  return <div className={`archive-date-picker ${value ? 'has-date' : ''}`} ref={rootRef}>
+    {value && <button type="button" className="date-step" onClick={() => moveDate(-1)} title="Previous day" aria-label="Previous day"><Icon name="chevronLeft" /></button>}
+    <button type="button" className={`date-trigger ${open ? 'active' : ''}`} onClick={toggle} aria-label="Filter by date" aria-expanded={open}>
+      <Icon name="calendar" /><span>{displayValue}</span>
+    </button>
+    {value && <button type="button" className="date-step" onClick={() => moveDate(1)} title="Next day" aria-label="Next day"><Icon name="chevronRight" /></button>}
+    {value && <button type="button" className="date-clear" onClick={() => onChange('')} title="Clear date filter" aria-label="Clear date filter"><Icon name="close" /></button>}
+    {open && <div className="calendar-popover">
+      <DayPicker
+        mode="single"
+        month={month}
+        onMonthChange={setMonth}
+        selected={selected}
+        onSelect={selectDate}
+        modifiers={{ hasRecordings: availableDates }}
+        modifiersClassNames={{ hasRecordings: 'has-recordings' }}
+        fixedWeeks
+      />
+    </div>}
+  </div>
 }
 
 function RotatedVideo({ src, rotation, startTime }) {
@@ -552,7 +659,9 @@ export default function App() {
   const [videoPage, setVideoPage] = useState(1)
   const [audioPage, setAudioPage] = useState(1)
   const [videoTotal, setVideoTotal] = useState(0)
+  const [videoTotalDuration, setVideoTotalDuration] = useState(0)
   const [audioTotal, setAudioTotal] = useState(0)
+  const [audioTotalDuration, setAudioTotalDuration] = useState(0)
   const [selectedVideoIds, setSelectedVideoIds] = useState(() => new Set())
   const [selectedAudioIds, setSelectedAudioIds] = useState(() => new Set())
   const [bulkRotation, setBulkRotation] = useState(90)
@@ -564,8 +673,9 @@ export default function App() {
     setLoading(true)
     setError('')
     try {
-      const videoParams = new URLSearchParams({ page: String(videoPage), pageSize: '200' })
-      const audioParams = new URLSearchParams({ page: String(audioPage), pageSize: '200' })
+      const timezoneOffsetMinutes = String(new Date().getTimezoneOffset())
+      const videoParams = new URLSearchParams({ page: String(videoPage), pageSize: '200', timezoneOffsetMinutes })
+      const audioParams = new URLSearchParams({ page: String(audioPage), pageSize: '200', timezoneOffsetMinutes })
       if (date) {
         videoParams.set('date', date)
         audioParams.set('date', date)
@@ -582,7 +692,9 @@ export default function App() {
       setVideos(list.items)
       setAudio(audioList.items)
       setVideoTotal(list.totalCount)
+      setVideoTotalDuration(list.totalDurationSeconds)
       setAudioTotal(audioList.totalCount)
+      setAudioTotalDuration(audioList.totalDurationSeconds)
       setSelectedVideoIds(current => new Set([...current].filter(id => list.items.some(item => item.id === id))))
       setSelectedAudioIds(current => new Set([...current].filter(id => audioList.items.some(item => item.id === id))))
       setStorage(status)
@@ -895,6 +1007,8 @@ export default function App() {
   const currentPage = archiveType === 'video' ? videoPage : audioPage
   const setCurrentPage = archiveType === 'video' ? setVideoPage : setAudioPage
   const currentTotal = archiveType === 'video' ? videoTotal : audioTotal
+  const currentTotalDuration = archiveType === 'video' ? videoTotalDuration : audioTotalDuration
+  const durationScope = date ? 'Selected day' : lockFilter === 'all' ? 'All recordings' : 'Filtered recordings'
   const totalPages = Math.max(1, Math.ceil(currentTotal / pageSize))
   const rangeStart = currentTotal === 0 ? 0 : (currentPage - 1) * pageSize + 1
   const rangeEnd = Math.min(currentPage * pageSize, currentTotal)
@@ -945,10 +1059,11 @@ export default function App() {
         </div>
         <div className="device-table-wrap">
           <table className="device-table">
-            <thead><tr><th>Device</th><th>Status</th><th>Battery</th><th>Power</th><th>Activity</th><th>Software</th><th>Last seen</th><th>Live</th></tr></thead>
+            <thead><tr><th>Device</th><th>Status</th><th>Last IP</th><th>Battery</th><th>Power</th><th>Activity</th><th>Software</th><th>Last seen</th><th>Live</th></tr></thead>
             <tbody>{devices.map(device => <tr key={device.deviceId}>
               <td className="device-name"><strong>{device.deviceName}</strong><small>{device.manufacturer} {device.model}</small></td>
               <td><span className={`device-status ${device.online ? 'online' : 'offline'}`}><i />{device.online ? 'Online' : 'Offline'}</span></td>
+              <td><code className="device-ip">{device.ipAddress || 'Unavailable'}</code></td>
               <td>
                 <div className="battery-value"><span>{device.batteryLevel}%</span><div><i style={{ width: `${device.batteryLevel}%` }} /></div></div>
               </td>
@@ -973,8 +1088,8 @@ export default function App() {
           <button className={archiveType === 'video' ? 'active' : ''} onClick={() => setArchiveType('video')}>Video</button>
           <button className={archiveType === 'audio' ? 'active' : ''} onClick={() => setArchiveType('audio')}>Audio</button>
         </div>
-        <div className="section-head"><div><p className="eyebrow">{archiveType === 'video' ? 'VIDEO ARCHIVE' : 'AUDIO ARCHIVE'}</p><h2>{archiveType === 'video' ? 'Video recordings' : 'Audio recordings'}</h2></div><div className="filters">
-          <input type="date" value={date} onChange={e => changeDate(e.target.value)} aria-label="Filter by date" />
+        <div className="section-head"><div><p className="eyebrow">{archiveType === 'video' ? 'VIDEO ARCHIVE' : 'AUDIO ARCHIVE'}</p><h2>{archiveType === 'video' ? 'Video recordings' : 'Audio recordings'}</h2><div className="archive-duration"><span>{durationScope} duration</span><strong>{formatTotalDuration(currentTotalDuration)}</strong></div></div><div className="filters">
+          <ArchiveDatePicker value={date} onChange={changeDate} archiveType={archiveType} lockFilter={lockFilter} />
           <select value={lockFilter} onChange={e => changeLockFilter(e.target.value)} aria-label="Filter by lock status">
             <option value="all">All statuses</option><option value="true">Locked</option><option value="false">Unlocked</option>
           </select>

@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import android.net.wifi.WifiManager
 import com.example.dashcam.BuildConfig
 import com.example.dashcam.live.LiveAccessSettings
 import com.example.dashcam.recording.PowerRecordingSettings
@@ -101,6 +102,7 @@ object DeviceStatusReporter {
             model = model,
             androidVersion = "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
             appVersion = BuildConfig.VERSION_NAME,
+            ipAddress = wifiIpv4Address(context),
             batteryLevel = batteryLevel,
             isCharging = isCharging,
             chargingSource = when {
@@ -117,5 +119,18 @@ object DeviceStatusReporter {
             liveStreaming = LiveAccessSettings.isStreaming(context),
             liveError = LiveAccessSettings.error(context)
         )
+    }
+
+    private fun wifiIpv4Address(context: Context): String {
+        val wifiManager = context.applicationContext
+            .getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return ""
+        val address = wifiManager.connectionInfo?.ipAddress ?: return ""
+        if (address == 0) return ""
+        return listOf(
+            address and 0xff,
+            address shr 8 and 0xff,
+            address shr 16 and 0xff,
+            address shr 24 and 0xff
+        ).joinToString(".")
     }
 }
