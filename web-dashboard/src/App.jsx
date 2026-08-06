@@ -22,6 +22,13 @@ const formatTotalDuration = (seconds = 0) => {
   return hours > 0 ? `${hours}h ${minutes}m ${remainingSeconds}s` : `${minutes}m ${remainingSeconds}s`
 }
 
+const videoGapSeconds = (newerVideo, olderVideo) => {
+  const newerStart = new Date(newerVideo?.startTime).getTime()
+  const olderEnd = new Date(olderVideo?.endTime).getTime()
+  if (!Number.isFinite(newerStart) || !Number.isFinite(olderEnd)) return null
+  return Math.max(0, (newerStart - olderEnd) / 1000)
+}
+
 const formatDate = (value) => new Intl.DateTimeFormat('en-GB', {
   month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
 }).format(new Date(value))
@@ -204,7 +211,20 @@ function ArchiveDatePicker({ value, onChange, archiveType, lockFilter }) {
   </div>
 }
 
-function RotatedVideo({ src, rotation, startTime }) {
+function RotatedVideo({
+  src,
+  rotation,
+  startTime,
+  initialTime = 0,
+  onEnded,
+  onPlaybackTime,
+  progressControl,
+  controlTime,
+  controlDuration,
+  seekVersion = 0,
+  playbackRate: controlledPlaybackRate,
+  onPlaybackRateChange,
+}) {
   const playerRef = useRef(null)
   const stageRef = useRef(null)
   const videoRef = useRef(null)
@@ -213,6 +233,8 @@ function RotatedVideo({ src, rotation, startTime }) {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [fullscreen, setFullscreen] = useState(false)
+  const [localPlaybackRate, setLocalPlaybackRate] = useState(1)
+  const playbackRate = controlledPlaybackRate ?? localPlaybackRate
 
   const updateLayout = useCallback(() => {
     const stage = stageRef.current
@@ -245,6 +267,17 @@ function RotatedVideo({ src, rotation, startTime }) {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
   }, [])
 
+  useEffect(() => {
+    if (seekVersion <= 0 || !videoRef.current || videoRef.current.readyState < 1) return
+    const nextTime = Math.min(Math.max(0, initialTime), videoRef.current.duration || 0)
+    videoRef.current.currentTime = nextTime
+    setCurrentTime(nextTime)
+  }, [initialTime, seekVersion])
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate
+  }, [playbackRate])
+
   const togglePlayback = () => {
     const video = videoRef.current
     if (!video) return
@@ -269,6 +302,12 @@ function RotatedVideo({ src, rotation, startTime }) {
     }
   }
 
+  const changePlaybackRate = event => {
+    const nextRate = Number(event.target.value)
+    if (onPlaybackRateChange) onPlaybackRateChange(nextRate)
+    else setLocalPlaybackRate(nextRate)
+  }
+
   return <div className="video-player" ref={playerRef}>
     <div className="video-stage" ref={stageRef}>
       <video
@@ -279,12 +318,23 @@ function RotatedVideo({ src, rotation, startTime }) {
         onClick={togglePlayback}
         onLoadedMetadata={() => {
           updateLayout()
-          setDuration(Number.isFinite(videoRef.current?.duration) ? videoRef.current.duration : 0)
+          const loadedDuration = Number.isFinite(videoRef.current?.duration) ? videoRef.current.duration : 0
+          const loadedTime = Math.min(Math.max(0, initialTime), loadedDuration)
+          setDuration(loadedDuration)
+          if (loadedTime > 0) videoRef.current.currentTime = loadedTime
+          setCurrentTime(loadedTime)
+          onPlaybackTime?.(loadedTime)
         }}
-        onTimeUpdate={event => setCurrentTime(event.currentTarget.currentTime)}
+        onTimeUpdate={event => {
+          setCurrentTime(event.currentTarget.currentTime)
+          onPlaybackTime?.(event.currentTarget.currentTime)
+        }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
+        onEnded={() => {
+          setPlaying(false)
+          onEnded?.()
+        }}
         style={{
           width: layout.width ? `${layout.width}px` : 0,
           height: layout.height ? `${layout.height}px` : 0,
@@ -293,7 +343,7 @@ function RotatedVideo({ src, rotation, startTime }) {
       />
     </div>
     <div className="video-controls">
-      <input
+      {progressControl === false ? null : progressControl || <input
         type="range"
         min="0"
         max={duration || 0}
@@ -301,17 +351,179 @@ function RotatedVideo({ src, rotation, startTime }) {
         value={Math.min(currentTime, duration || 0)}
         onChange={seek}
         aria-label="Video progress"
-      />
+      />}
       <div className="video-control-row">
         <button type="button" className="playback-control" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'} title={playing ? 'Pause' : 'Play'}>
           <Icon name={playing ? 'pause' : 'play'} />
         </button>
-        <span>{formatDuration(Math.floor(currentTime))} / {formatDuration(Math.floor(duration))}</span>
+        <span>{formatDuration(Math.floor(controlTime ?? currentTime))} / {formatDuration(Math.floor(controlDuration ?? duration))}</span>
         <span className="playback-timestamp"><small>Recorded time</small><strong>{formatPlaybackTimestamp(startTime, currentTime)}</strong></span>
+        <select className="playback-rate" value={playbackRate} onChange={changePlaybackRate} aria-label="Playback speed" title="Playback speed">
+          {[0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].map(rate => <option value={rate} key={rate}>{rate}x</option>)}
+        </select>
         <button type="button" className="playback-control fullscreen-control" onClick={toggleFullscreen} aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
           <Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} />
         </button>
       </div>
+    </div>
+  </div>
+}
+
+function SessionPlayback({ session }) {
+  const clips = session.videos
+  const [clipIndex, setClipIndex] = useState(0)
+  const [gapEntryIndex, setGapEntryIndex] = useState(null)
+  const [gapStartPosition, setGapStartPosition] = useState(0)
+  const [sessionPosition, setSessionPosition] = useState(0)
+  const [scrubPosition, setScrubPosition] = useState(null)
+  const [initialClipTime, setInitialClipTime] = useState(0)
+  const [playbackKey, setPlaybackKey] = useState(0)
+  const [playbackRate, setPlaybackRate] = useState(1)
+  const [finished, setFinished] = useState(false)
+  const clip = clips[clipIndex]
+  const timeline = useMemo(() => {
+    const entries = []
+    const clipEntries = []
+    let position = 0
+    clips.forEach((timelineClip, index) => {
+      const duration = Math.max(0, Number(timelineClip.durationSeconds) || 0)
+      const clipEntry = { type: 'clip', clipIndex: index, start: position, end: position + duration, duration }
+      entries.push(clipEntry)
+      clipEntries.push(clipEntry)
+      position += duration
+      if (index >= clips.length - 1) return
+      const gapDuration = videoGapSeconds(clips[index + 1], timelineClip) || 0
+      if (gapDuration > 0) {
+        entries.push({ type: 'gap', afterClipIndex: index, start: position, end: position + gapDuration, duration: gapDuration })
+        position += gapDuration
+      }
+    })
+    return { entries, clipEntries, duration: position }
+  }, [clips])
+  const gapEntry = gapEntryIndex == null ? null : timeline.entries[gapEntryIndex]
+  const currentClipEntry = timeline.clipEntries[clipIndex]
+
+  useEffect(() => {
+    if (!gapEntry || scrubPosition !== null) return undefined
+    const startedAt = performance.now()
+    const interval = window.setInterval(() => {
+      const nextPosition = gapStartPosition + (performance.now() - startedAt) / 1000 * playbackRate
+      if (nextPosition < gapEntry.end) {
+        setSessionPosition(nextPosition)
+        return
+      }
+      setSessionPosition(gapEntry.end)
+      setGapEntryIndex(null)
+      setClipIndex(Math.min(clips.length - 1, gapEntry.afterClipIndex + 1))
+      setInitialClipTime(0)
+      setPlaybackKey(key => key + 1)
+    }, 50)
+    return () => window.clearInterval(interval)
+  }, [gapEntry, gapStartPosition, clips.length, scrubPosition, playbackRate])
+
+  const startGap = (entryIndex, position) => {
+    setGapEntryIndex(entryIndex)
+    setGapStartPosition(position)
+    setSessionPosition(position)
+  }
+
+  const advance = () => {
+    if (clipIndex >= clips.length - 1) {
+      setSessionPosition(timeline.duration)
+      setFinished(true)
+      return
+    }
+    const currentEntryIndex = timeline.entries.indexOf(currentClipEntry)
+    const nextEntry = timeline.entries[currentEntryIndex + 1]
+    if (nextEntry?.type === 'gap') startGap(currentEntryIndex + 1, nextEntry.start)
+    else {
+      setClipIndex(index => index + 1)
+      setInitialClipTime(0)
+      setPlaybackKey(key => key + 1)
+    }
+  }
+
+  const seekSession = position => {
+    const entryIndex = timeline.entries.findIndex(entry => position < entry.end)
+    const resolvedIndex = entryIndex < 0 ? timeline.entries.length - 1 : entryIndex
+    const entry = timeline.entries[resolvedIndex]
+    setFinished(false)
+    if (entry.type === 'gap') {
+      startGap(resolvedIndex, position)
+      return
+    }
+    setGapEntryIndex(null)
+    setClipIndex(entry.clipIndex)
+    setInitialClipTime(Math.max(0, position - entry.start))
+    setSessionPosition(position)
+    setPlaybackKey(key => key + 1)
+  }
+
+  const commitSessionSeek = event => {
+    const position = Number(event.currentTarget.value)
+    setScrubPosition(null)
+    seekSession(position)
+  }
+
+  const previewSessionSeek = event => {
+    const position = Number(event.currentTarget.value)
+    setScrubPosition(position)
+    seekSession(position)
+  }
+
+  const changeSessionPlaybackRate = nextRate => {
+    if (gapEntry) setGapStartPosition(sessionPosition)
+    setPlaybackRate(nextRate)
+  }
+
+  const displayedPosition = scrubPosition ?? sessionPosition
+
+  const timelineControl = <div className="session-timeline">
+    <input
+      type="range"
+      min="0"
+      max={timeline.duration || 0}
+      step="0.1"
+      value={Math.min(displayedPosition, timeline.duration || 0)}
+      onPointerDown={() => setScrubPosition(sessionPosition)}
+      onChange={previewSessionSeek}
+      onPointerUp={commitSessionSeek}
+      onPointerCancel={() => setScrubPosition(null)}
+      onKeyUp={commitSessionSeek}
+      aria-label="Session progress"
+    />
+    <div className="session-timeline-segments" aria-hidden="true">
+      {timeline.entries.map((entry, index) => <i
+        className={entry.type}
+        key={`${entry.type}-${index}`}
+        style={{ flexGrow: Math.max(entry.duration, 0.05) }}
+      />)}
+    </div>
+  </div>
+
+  return <div className="session-playback">
+    <div className="session-playback-status">
+      <strong>{gapEntry ? 'Black interval' : finished ? 'Session complete' : `Clip ${clipIndex + 1} of ${clips.length}`}</strong>
+      <span>{gapEntry ? `${gapEntry.duration.toFixed(1)}s gap` : clip.originalFilename || clip.filename}</span>
+    </div>
+    {gapEntry
+      ? <div className="video-player"><div className="video-stage session-black-frame" /></div>
+      : <RotatedVideo
+          key={clip.id}
+          src={`${API}/api/videos/${clip.id}/stream`}
+          rotation={clip.playbackRotationDegrees || 0}
+          startTime={clip.startTime}
+          initialTime={initialClipTime}
+          onEnded={advance}
+          onPlaybackTime={time => setSessionPosition(Math.min(timeline.duration, currentClipEntry.start + time))}
+          progressControl={false}
+          seekVersion={playbackKey}
+          playbackRate={playbackRate}
+          onPlaybackRateChange={changeSessionPlaybackRate}
+        />}
+    <div className="session-master-controls">
+      {timelineControl}
+      <div className="session-timeline-readout"><span>Session</span><strong>{formatDuration(Math.floor(displayedPosition))} / {formatDuration(Math.floor(timeline.duration))}</strong></div>
     </div>
   </div>
 }
@@ -649,6 +861,7 @@ export default function App() {
   const [devices, setDevices] = useState([])
   const [online, setOnline] = useState(null)
   const [selected, setSelected] = useState(null)
+  const [selectedSession, setSelectedSession] = useState(null)
   const [selectedAudio, setSelectedAudio] = useState(null)
   const [liveDeviceId, setLiveDeviceId] = useState(null)
   const [archiveType, setArchiveType] = useState('video')
@@ -662,6 +875,7 @@ export default function App() {
   const [videoTotalDuration, setVideoTotalDuration] = useState(0)
   const [audioTotal, setAudioTotal] = useState(0)
   const [audioTotalDuration, setAudioTotalDuration] = useState(0)
+  const [groupVideoSessions, setGroupVideoSessions] = useState(false)
   const [selectedVideoIds, setSelectedVideoIds] = useState(() => new Set())
   const [selectedAudioIds, setSelectedAudioIds] = useState(() => new Set())
   const [bulkRotation, setBulkRotation] = useState(90)
@@ -733,6 +947,34 @@ export default function App() {
     ? Math.min(100, storage.totalSizeBytes / storage.maxStorageBytes * 100) : 0, [storage])
   const audioStoragePercent = useMemo(() => storage
     ? Math.min(100, storage.totalAudioSizeBytes / storage.maxAudioStorageBytes * 100) : 0, [storage])
+  const videoSessions = useMemo(() => {
+    const starts = new Map()
+    const ends = new Map()
+    let sessionNumber = 1
+    let sessionStartIndex = 0
+    let sessionDurationSeconds = 0
+    videos.forEach((video, index) => {
+      sessionDurationSeconds += Number(video.durationSeconds) || 0
+      const nextGapSeconds = index < videos.length - 1 ? videoGapSeconds(video, videos[index + 1]) : null
+      if (index === videos.length - 1 || nextGapSeconds > 5) {
+        const sessionVideos = videos.slice(sessionStartIndex, index + 1).reverse()
+        const gapDurationSeconds = sessionVideos.slice(0, -1).reduce((total, clip, clipIndex) =>
+          total + (videoGapSeconds(sessionVideos[clipIndex + 1], clip) || 0), 0)
+        const session = {
+          number: sessionNumber,
+          count: index - sessionStartIndex + 1,
+          durationSeconds: Math.round(sessionDurationSeconds + gapDurationSeconds),
+          videos: sessionVideos,
+        }
+        starts.set(sessionStartIndex, session)
+        ends.set(index, session)
+        sessionNumber += 1
+        sessionStartIndex = index + 1
+        sessionDurationSeconds = 0
+      }
+    })
+    return { starts, ends }
+  }, [videos])
   const liveDevice = devices.find(device => device.deviceId === liveDeviceId)
 
   const startLive = async (device) => {
@@ -1089,6 +1331,7 @@ export default function App() {
           <button className={archiveType === 'audio' ? 'active' : ''} onClick={() => setArchiveType('audio')}>Audio</button>
         </div>
         <div className="section-head"><div><p className="eyebrow">{archiveType === 'video' ? 'VIDEO ARCHIVE' : 'AUDIO ARCHIVE'}</p><h2>{archiveType === 'video' ? 'Video recordings' : 'Audio recordings'}</h2><div className="archive-duration"><span>{durationScope} duration</span><strong>{formatTotalDuration(currentTotalDuration)}</strong></div></div><div className="filters">
+          {archiveType === 'video' && <button type="button" className={`session-toggle ${groupVideoSessions ? 'active' : ''}`} aria-pressed={groupVideoSessions} onClick={() => setGroupVideoSessions(current => !current)}>{groupVideoSessions ? 'Sessions grouped' : 'Group sessions'}</button>}
           <ArchiveDatePicker value={date} onChange={changeDate} archiveType={archiveType} lockFilter={lockFilter} />
           <select value={lockFilter} onChange={e => changeLockFilter(e.target.value)} aria-label="Filter by lock status">
             <option value="all">All statuses</option><option value="true">Locked</option><option value="false">Unlocked</option>
@@ -1110,20 +1353,32 @@ export default function App() {
         </div>}
 
         {archiveType === 'video' ? <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(videos, selectedVideoIds, setSelectedVideoIds)} aria-label="Select all visible videos" /></th><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Rotation</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody>{videos.map(video => <tr key={video.id}>
-            <td className="select-cell"><input type="checkbox" checked={selectedVideoIds.has(video.id)} onChange={() => toggleSelection(setSelectedVideoIds, video.id)} aria-label={`Select ${video.originalFilename || video.filename}`} /></td>
-            <td>{formatDate(video.startTime)}</td>
-            <td className="file"><span>{video.originalFilename || video.filename}</span><small>#{video.id}</small></td>
-            <td>{formatDuration(video.durationSeconds)}</td><td>{formatBytes(video.fileSizeBytes)}</td>
-            <td>{video.playbackRotationDegrees || 0} deg</td>
-            <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? 'Locked' : 'Unlocked'}</span></td>
-            <td><div className="actions">
-              <button title="Play" onClick={() => setSelected(video)}><Icon name="play" /></button>
-              <a title="Download" href={`${API}/api/videos/${video.id}/download`}><Icon name="download" /></a>
-              <button title={video.locked ? 'Unlock' : 'Lock'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
-              <button className="danger" title="Delete" onClick={() => remove(video)}><Icon name="trash" /></button>
-            </div></td>
-          </tr>)}</tbody></table>
+          <tbody>{videos.flatMap((video, index) => {
+            const rows = []
+            const sessionStart = videoSessions.starts.get(index)
+            const sessionEnd = videoSessions.ends.get(index)
+            if (groupVideoSessions && sessionStart) rows.push(
+              <tr className="session-header" key={`session-header-${video.id}`}><td colSpan="8"><div><span><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'video' : 'videos'}</small></span><button type="button" onClick={() => setSelectedSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
+            )
+            rows.push(<tr className={groupVideoSessions ? 'video-row grouped' : 'video-row'} key={video.id}>
+              <td className="select-cell"><input type="checkbox" checked={selectedVideoIds.has(video.id)} onChange={() => toggleSelection(setSelectedVideoIds, video.id)} aria-label={`Select ${video.originalFilename || video.filename}`} /></td>
+              <td>{formatDate(video.startTime)}</td>
+              <td className="file"><span>{video.originalFilename || video.filename}</span><small>#{video.id}</small></td>
+              <td>{formatDuration(video.durationSeconds)}</td><td>{formatBytes(video.fileSizeBytes)}</td>
+              <td>{video.playbackRotationDegrees || 0} deg</td>
+              <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? 'Locked' : 'Unlocked'}</span></td>
+              <td><div className="actions">
+                <button title="Play" onClick={() => setSelected(video)}><Icon name="play" /></button>
+                <a title="Download" href={`${API}/api/videos/${video.id}/download`}><Icon name="download" /></a>
+                <button title={video.locked ? 'Unlock' : 'Lock'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
+                <button className="danger" title="Delete" onClick={() => remove(video)}><Icon name="trash" /></button>
+              </div></td>
+            </tr>)
+            if (groupVideoSessions && sessionEnd) rows.push(
+              <tr className="session-summary" key={`session-summary-${video.id}`}><td colSpan="8"><span><i />Session {sessionEnd.number} total <strong>{formatTotalDuration(sessionEnd.durationSeconds)}</strong><i /></span></td></tr>
+            )
+            return rows
+          })}</tbody></table>
           {!loading && videos.length === 0 && <div className="empty"><span>00:00</span><h3>No videos yet</h3><p>Videos will appear here after the phone completes its first upload.</p></div>}
           {loading && <div className="empty"><div className="spinner" /><p>Loading video library...</p></div>}
         </div> : <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(audio, selectedAudioIds, setSelectedAudioIds)} aria-label="Select all visible audio recordings" /></th><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
@@ -1158,6 +1413,11 @@ export default function App() {
       <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button className="rotate-control" title="Rotate playback clockwise by 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /><span>Rotate 90 deg</span></button><button className="close-player" aria-label="Close player" onClick={() => setSelected(null)}>X</button></span></div>
       <RotatedVideo key={selected.id} src={`${API}/api/videos/${selected.id}/stream`} rotation={selected.playbackRotationDegrees || 0} startTime={selected.startTime} />
       <p>{formatDate(selected.startTime)} | {formatDuration(selected.durationSeconds)} | {formatBytes(selected.fileSizeBytes)} | Playback {selected.playbackRotationDegrees || 0} deg</p>
+    </div></div>}
+    {selectedSession && <div className="modal" onMouseDown={() => setSelectedSession(null)}><div className="player session-player" onMouseDown={event => event.stopPropagation()}>
+      <div><strong>Session {selectedSession.number} · {selectedSession.count} {selectedSession.count === 1 ? 'video' : 'videos'}</strong><button className="close-player" aria-label="Close session player" onClick={() => setSelectedSession(null)}>X</button></div>
+      <SessionPlayback key={selectedSession.number} session={selectedSession} />
+      <p>{formatDate(selectedSession.videos[0].startTime)} to {formatDate(selectedSession.videos.at(-1).endTime)} | {formatTotalDuration(selectedSession.durationSeconds)} including short black intervals</p>
     </div></div>}
     {selectedAudio && <div className="modal" onMouseDown={() => setSelectedAudio(null)}><div className="player audio-player-modal" onMouseDown={e => e.stopPropagation()}>
       <div><strong>{selectedAudio.originalFilename || selectedAudio.filename}</strong><button className="close-player" aria-label="Close player" onClick={() => setSelectedAudio(null)}>X</button></div>
