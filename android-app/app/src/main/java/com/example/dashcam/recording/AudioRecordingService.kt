@@ -176,7 +176,6 @@ class AudioRecordingService : Service() {
                         fileSizeBytes = destination.length()
                     )
                 )
-                UploadWorker.enqueueNow(this@AudioRecordingService)
                 val deletedCount = AudioStoragePolicy.enforceLimit(
                     this@AudioRecordingService,
                     destination.parentFile ?: audioDirectory()
@@ -226,6 +225,7 @@ class AudioRecordingService : Service() {
         segmentStartMs = 0L
         PowerRecordingSettings.setAudioRecordingActive(this, false)
         releaseWakeLock()
+        UploadWorker.enqueueNow(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         broadcastState(false, 0, null, message)
         stopSelf()

@@ -1325,8 +1325,6 @@ class MainActivity : ComponentActivity() {
                 PowerRecordingSettings.isDeviceCharging(this)
         PowerRecordingSettings.setPowerAutoStartSuppressed(this, suppressUntilPowerCycle)
         startService(Intent(this, BackgroundRecordingService::class.java).setAction(BackgroundRecordingService.ACTION_STOP))
-        backgroundRecordingActive = false
-        PowerRecordingSettings.setBackgroundRecordingActive(this, false)
         updateBackgroundRecordButton()
         toast("Stopping background recording")
     }
@@ -1743,7 +1741,6 @@ class MainActivity : ComponentActivity() {
                                 fileSizeBytes = finishedFile.length()
                             )
                         )
-                        UploadWorker.enqueueNow(this@MainActivity)
                         withContext(Dispatchers.Main) {
                             if (continueRecording) completedSegmentsSinceManualStart += 1
                             if (stopAfterCurrentSegment) continueRecording = false
@@ -1790,6 +1787,7 @@ class MainActivity : ComponentActivity() {
             stopAfterCurrentSegment = false
             cameraProvider?.unbindAll()
             setRecordingPreference(false)
+            UploadWorker.enqueueNow(this)
             renderRecording(false)
             mainHandler.removeCallbacks(timerRunnable)
             updatePreviewAvailability()
@@ -1807,6 +1805,7 @@ class MainActivity : ComponentActivity() {
         } else {
             cameraProvider?.unbindAll()
             setRecordingPreference(false)
+            UploadWorker.enqueueNow(this)
             renderRecording(false)
             mainHandler.removeCallbacks(timerRunnable)
             updatePreviewAvailability()
@@ -1821,6 +1820,7 @@ class MainActivity : ComponentActivity() {
         recording?.stop()
         cameraProvider?.unbindAll()
         setRecordingPreference(false)
+        UploadWorker.enqueueNow(this)
         renderRecording(false)
         updatePreviewAvailability()
         toast(message)

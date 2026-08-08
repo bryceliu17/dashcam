@@ -17,6 +17,7 @@ import androidx.work.Constraints
 import androidx.work.workDataOf
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.network.ServerClient
+import com.example.dashcam.recording.PowerRecordingSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -28,12 +29,7 @@ import java.util.concurrent.TimeUnit
 class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         uploadMutex.withLock {
-            val wifiLock = acquireWifiLock()
-            try {
-                runUpload()
-            } finally {
-                if (wifiLock?.isHeld == true) wifiLock.release()
-            }
+            runUpload()
         }
     }
 
@@ -59,6 +55,9 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         if (!manual && !isAutomaticUploadEnabled(applicationContext)) {
             return Result.success(workDataOf(KEY_MESSAGE to "Automatic upload is disabled"))
         }
+        if (!manual && PowerRecordingSettings.isAnyRecordingActive(applicationContext)) {
+            return Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred while recording"))
+        }
         if (!isWifiConnected()) return failureOrDefer(manual, "Connect to Wi-Fi before uploading")
 
         val database = DashcamDatabase.get(applicationContext)
@@ -75,54 +74,78 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             .getString(KEY_SERVER_URL, DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
         val defaultPlaybackRotation = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getInt(KEY_DEFAULT_PLAYBACK_ROTATION, 0)
+        val candidates = if (audioOnly) emptyList() else dao.uploadCandidates()
+        val audioCandidates = if (videoOnly) emptyList() else audioDao.uploadCandidates()
+        if (candidates.isEmpty() && audioCandidates.isEmpty()) {
+            return Result.success(workDataOf(KEY_MESSAGE to when {
+                audioOnly -> "No pending audio to upload"
+                videoOnly -> "No pending videos to upload"
+                else -> "No pending recordings to upload"
+            }))
+        }
+
         val client = ServerClient(serverUrl)
         if (!client.health()) return failureOrDefer(manual, "Server is unreachable: $serverUrl")
+        if (!manual && PowerRecordingSettings.isAnyRecordingActive(applicationContext)) {
+            return Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred while recording"))
+        }
 
         var failed = false
         var uploadedVideos = 0
         var uploadedAudio = 0
         var lastError = "Upload failed"
-        val candidates = if (audioOnly) emptyList() else dao.uploadCandidates()
-        for (video in candidates) {
-            if (!manual && !isAutomaticUploadEnabled(applicationContext)) break
-            if (dao.markUploading(video.id, System.currentTimeMillis()) == 0) continue
-            try {
-                val serverId = client.upload(video, video.playbackRotationDegrees ?: defaultPlaybackRotation)
-                dao.markUploaded(video.id, serverId, System.currentTimeMillis())
-                uploadedVideos += 1
-            } catch (cancelled: CancellationException) {
-                withContext(NonCancellable) {
-                    dao.markFailed(video.id, "Upload job was cancelled; queued for retry", System.currentTimeMillis())
-                }
-                throw cancelled
-            } catch (error: Exception) {
-                failed = true
-                lastError = error.message?.take(500) ?: "Upload failed"
-                dao.markFailed(video.id, lastError, System.currentTimeMillis())
-            }
-        }
-        val audioCandidates = if (videoOnly) emptyList() else audioDao.uploadCandidates()
-        for (audio in audioCandidates) {
-            if (!manual && !isAutomaticUploadEnabled(applicationContext)) break
-            if (audioDao.markUploading(audio.id, System.currentTimeMillis()) == 0) continue
-            try {
-                val serverId = client.uploadAudio(audio)
-                audioDao.markUploaded(audio.id, serverId, System.currentTimeMillis())
-                uploadedAudio += 1
-            } catch (cancelled: CancellationException) {
-                withContext(NonCancellable) {
-                    audioDao.markFailed(
-                        audio.id,
-                        "Upload job was cancelled; queued for retry",
-                        System.currentTimeMillis()
+        val wifiLock = acquireWifiLock()
+        try {
+            for (video in candidates) {
+                if (!manual && (
+                        !isAutomaticUploadEnabled(applicationContext) ||
+                            PowerRecordingSettings.isAnyRecordingActive(applicationContext)
                     )
+                ) break
+                if (dao.markUploading(video.id, System.currentTimeMillis()) == 0) continue
+                try {
+                    val serverId = client.upload(video, video.playbackRotationDegrees ?: defaultPlaybackRotation)
+                    dao.markUploaded(video.id, serverId, System.currentTimeMillis())
+                    uploadedVideos += 1
+                } catch (cancelled: CancellationException) {
+                    withContext(NonCancellable) {
+                        dao.markFailed(video.id, "Upload job was cancelled; queued for retry", System.currentTimeMillis())
+                    }
+                    throw cancelled
+                } catch (error: Exception) {
+                    failed = true
+                    lastError = error.message?.take(500) ?: "Upload failed"
+                    dao.markFailed(video.id, lastError, System.currentTimeMillis())
                 }
-                throw cancelled
-            } catch (error: Exception) {
-                failed = true
-                lastError = error.message?.take(500) ?: "Upload failed"
-                audioDao.markFailed(audio.id, lastError, System.currentTimeMillis())
             }
+            for (audio in audioCandidates) {
+                if (!manual && (
+                        !isAutomaticUploadEnabled(applicationContext) ||
+                            PowerRecordingSettings.isAnyRecordingActive(applicationContext)
+                    )
+                ) break
+                if (audioDao.markUploading(audio.id, System.currentTimeMillis()) == 0) continue
+                try {
+                    val serverId = client.uploadAudio(audio)
+                    audioDao.markUploaded(audio.id, serverId, System.currentTimeMillis())
+                    uploadedAudio += 1
+                } catch (cancelled: CancellationException) {
+                    withContext(NonCancellable) {
+                        audioDao.markFailed(
+                            audio.id,
+                            "Upload job was cancelled; queued for retry",
+                            System.currentTimeMillis()
+                        )
+                    }
+                    throw cancelled
+                } catch (error: Exception) {
+                    failed = true
+                    lastError = error.message?.take(500) ?: "Upload failed"
+                    audioDao.markFailed(audio.id, lastError, System.currentTimeMillis())
+                }
+            }
+        } finally {
+            if (wifiLock?.isHeld == true) wifiLock.release()
         }
         return when {
             failed && manual -> Result.failure(workDataOf(KEY_ERROR to lastError))
@@ -130,12 +153,6 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 Log.w(TAG, "Automatic upload deferred: $lastError")
                 Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred: $lastError"))
             }
-            candidates.isEmpty() && audioCandidates.isEmpty() ->
-                Result.success(workDataOf(KEY_MESSAGE to when {
-                    audioOnly -> "No pending audio to upload"
-                    videoOnly -> "No pending videos to upload"
-                    else -> "No pending recordings to upload"
-                }))
             audioOnly -> Result.success(workDataOf(KEY_MESSAGE to "Uploaded $uploadedAudio audio recording(s)"))
             videoOnly -> Result.success(workDataOf(KEY_MESSAGE to "Uploaded $uploadedVideos video(s)"))
             else -> Result.success(
@@ -184,7 +201,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork(
                 UNIQUE_AUTO_NOW,
-                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                ExistingWorkPolicy.KEEP,
                 request
             )
         }
