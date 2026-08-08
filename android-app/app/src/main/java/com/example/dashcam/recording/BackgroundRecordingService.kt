@@ -385,7 +385,6 @@ class BackgroundRecordingService : Service() {
                         fileSizeBytes = file.length()
                     )
                 )
-                UploadWorker.enqueueNow(this@BackgroundRecordingService)
                 mainHandler.post { continueAfterSegment(restart) }
             }
         } else {
@@ -443,6 +442,7 @@ class BackgroundRecordingService : Service() {
 
     private fun finishService() {
         cleanupResources()
+        UploadWorker.enqueueNow(this)
         stopSelf()
     }
 

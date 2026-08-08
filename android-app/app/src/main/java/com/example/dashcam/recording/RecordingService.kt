@@ -34,6 +34,7 @@ import com.example.dashcam.MainActivity
 import com.example.dashcam.R
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.VideoEntity
+import com.example.dashcam.upload.UploadWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -159,7 +160,6 @@ class RecordingService : LifecycleService() {
                                 fileSizeBytes = finishedFile.length()
                             )
                         )
-                        UploadScheduler.onSegmentReady(this@RecordingService)
                         withContext(Dispatchers.Main) {
                             val message = if (event.hasError()) {
                                 "Saved ${finishedFile.name} after stop"
@@ -281,6 +281,7 @@ class RecordingService : LifecycleService() {
         setRecordingPreference(false)
         cameraProvider?.unbindAll()
         releaseWakeLock()
+        UploadWorker.enqueueNow(this)
         stopForegroundCompat()
         stopSelf()
     }
@@ -348,7 +349,7 @@ class RecordingService : LifecycleService() {
     }
 
     private fun setRecordingPreference(active: Boolean) {
-        getSharedPreferences("dashcam_settings", MODE_PRIVATE).edit().putBoolean("recording_active", active).apply()
+        PowerRecordingSettings.setForegroundRecordingActive(this, active)
     }
 
     override fun onDestroy() {
@@ -372,8 +373,4 @@ class RecordingService : LifecycleService() {
         private const val NOTIFICATION_ID = 1001
         private const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
     }
-}
-
-private object UploadScheduler {
-    fun onSegmentReady(context: Context) = com.example.dashcam.upload.UploadWorker.enqueueNow(context)
 }
