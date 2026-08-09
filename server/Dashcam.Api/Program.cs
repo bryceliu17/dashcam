@@ -18,6 +18,7 @@ var connectionString = builder.Configuration.GetConnectionString("DashcamDatabas
     ?? "Data Source=dashcam.db";
 builder.Services.AddDbContext<DashcamDbContext>(options => options.UseSqlite(connectionString));
 builder.Services.AddSingleton<LiveFrameStore>();
+builder.Services.AddSingleton<DeviceWebSocketHub>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveMigrationService>();
 builder.Services.AddSingleton<MigrationUploadService>();
@@ -27,6 +28,10 @@ builder.Services.Configure<FormOptions>(options =>
     options.MultipartBodyLengthLimit = 4L * 1024 * 1024 * 1024);
 
 var app = builder.Build();
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(60)
+});
 app.UseCors();
 var videoCleanupGate = new SemaphoreSlim(1, 1);
 var audioCleanupGate = new SemaphoreSlim(1, 1);
@@ -79,11 +84,56 @@ app.MapGet("/api/health", () => Results.Ok(new
     serverTime = DateTime.UtcNow
 }));
 
+app.MapGet("/api/devices/socket", async (
+    HttpContext context,
+    DashcamDbContext db,
+    DeviceWebSocketHub sockets,
+    LiveFrameStore liveFrames,
+    CancellationToken cancellationToken) =>
+{
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new { error = "A WebSocket upgrade is required." }, cancellationToken);
+        return;
+    }
+
+    var deviceId = CleanRequiredText(context.Request.Query["deviceId"], 128);
+    if (deviceId is null)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new { error = "deviceId is required." }, cancellationToken);
+        return;
+    }
+
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null)
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        await context.Response.WriteAsJsonAsync(new { error = "Device not found." }, cancellationToken);
+        return;
+    }
+
+    if (device.LiveRequested &&
+        !liveFrames.HasRecentViewer(deviceId, TimeSpan.FromSeconds(10)))
+    {
+        device.LiveRequested = false;
+        device.LiveStreaming = false;
+        device.LiveError = string.Empty;
+        liveFrames.Remove(deviceId);
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    using var socket = await context.WebSockets.AcceptWebSocketAsync();
+    await sockets.RunDeviceAsync(deviceId, socket, device.LiveRequested, cancellationToken);
+});
+
 app.MapPost("/api/devices/heartbeat", async (
     DeviceHeartbeatRequest request,
     HttpContext httpContext,
     DashcamDbContext db,
     LiveFrameStore liveFrames,
+    DeviceWebSocketHub sockets,
     CancellationToken cancellationToken) =>
 {
     var deviceId = CleanRequiredText(request.DeviceId, 128);
@@ -147,7 +197,8 @@ app.MapPost("/api/devices/heartbeat", async (
         device.LiveStreaming = false;
         liveFrames.Remove(deviceId);
     }
-    else if (device.LiveRequested && !liveFrames.HasRecentViewer(deviceId, TimeSpan.FromSeconds(10)))
+    else if (device.LiveRequested &&
+        !liveFrames.HasRecentViewer(deviceId, TimeSpan.FromSeconds(10)))
     {
         device.LiveRequested = false;
         device.LiveStreaming = false;
@@ -159,7 +210,10 @@ app.MapPost("/api/devices/heartbeat", async (
     return Results.Ok(ToDeviceResponse(device, now));
 });
 
-app.MapGet("/api/devices", async (DashcamDbContext db, CancellationToken cancellationToken) =>
+app.MapGet("/api/devices", async (
+    DashcamDbContext db,
+    DeviceWebSocketHub sockets,
+    CancellationToken cancellationToken) =>
 {
     var now = DateTime.UtcNow;
     var devices = await db.DeviceStatuses.AsNoTracking()
@@ -169,7 +223,10 @@ app.MapGet("/api/devices", async (DashcamDbContext db, CancellationToken cancell
     {
         serverTime = now,
         onlineThresholdSeconds = DeviceOnlineThresholdSeconds,
-        items = devices.Select(device => ToDeviceResponse(device, now))
+        items = devices.Select(device => ToDeviceResponse(
+            device,
+            now,
+            device.LiveAccessEnabled ? sockets.GetConnectionState(device.DeviceId) : null))
     });
 });
 
@@ -178,6 +235,7 @@ app.MapPost("/api/devices/{deviceId}/live", async (
     LiveRequest request,
     DashcamDbContext db,
     LiveFrameStore liveFrames,
+    DeviceWebSocketHub sockets,
     CancellationToken cancellationToken) =>
 {
     var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
@@ -185,8 +243,9 @@ app.MapPost("/api/devices/{deviceId}/live", async (
 
     if (request.Enabled)
     {
-        var online = DateTime.UtcNow - AsUtc(device.LastSeenAt) <=
-            TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds);
+        var socketState = sockets.GetConnectionState(deviceId);
+        var online = socketState ?? (DateTime.UtcNow - AsUtc(device.LastSeenAt) <=
+            TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds));
         if (!online) return Results.Conflict(new { error = "Phone is offline." });
         if (!device.LiveAccessEnabled) return Results.Conflict(new { error = "Live Access is disabled on the phone." });
         if (device.VideoRecordingActive || device.AudioRecordingActive)
@@ -204,7 +263,11 @@ app.MapPost("/api/devices/{deviceId}/live", async (
 
     device.LiveRequested = request.Enabled;
     await db.SaveChangesAsync(cancellationToken);
-    return Results.Ok(ToDeviceResponse(device, DateTime.UtcNow));
+    await sockets.SendLiveRequestAsync(deviceId, request.Enabled, cancellationToken);
+    return Results.Ok(ToDeviceResponse(
+        device,
+        DateTime.UtcNow,
+        device.LiveAccessEnabled ? sockets.GetConnectionState(deviceId) : null));
 });
 
 app.MapPost("/api/devices/{deviceId}/live/frame", async (
@@ -1293,7 +1356,7 @@ static object ToAudioResponse(AudioRecording audio) => new
     streamUrl = $"/api/audio/{audio.Id}/stream"
 };
 
-static object ToDeviceResponse(DeviceStatus device, DateTime now) => new
+static object ToDeviceResponse(DeviceStatus device, DateTime now, bool? socketConnected = null) => new
 {
     device.DeviceId,
     device.DeviceName,
@@ -1312,7 +1375,8 @@ static object ToDeviceResponse(DeviceStatus device, DateTime now) => new
     device.LiveRequested,
     device.LiveStreaming,
     device.LiveError,
-    Online = now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds),
+    Online = socketConnected ??
+        (now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds)),
     LastSeenAt = AsUtc(device.LastSeenAt),
     FirstSeenAt = AsUtc(device.FirstSeenAt)
 };
