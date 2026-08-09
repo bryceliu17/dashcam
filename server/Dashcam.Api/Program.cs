@@ -956,7 +956,7 @@ static string GetAudioStorageRoot(IConfiguration config)
 
 static long GetMaxStorageBytes(IConfiguration config)
 {
-    var maxGb = config.GetValue<double?>("MaxStorageGB") ?? 235;
+    var maxGb = config.GetValue<double?>("MaxStorageGB") ?? 280;
     return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
 }
 
@@ -1049,7 +1049,7 @@ static async Task<VideoCleanupResult> CleanupAudioAsync(
 
 static long GetMaxAudioStorageBytes(IConfiguration config)
 {
-    var maxGb = config.GetValue<double?>("MaxAudioStorageGB") ?? 15;
+    var maxGb = config.GetValue<double?>("MaxAudioStorageGB") ?? 20;
     return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
 }
 

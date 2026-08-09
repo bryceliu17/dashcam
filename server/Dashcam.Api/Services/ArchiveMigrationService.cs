@@ -213,8 +213,8 @@ public sealed class ArchiveMigrationService
             var totals = await ReadCurrentTotalsAsync(targetDatabase, token);
             var importVideoBytes = items.Where(x => x.Kind == "video").Sum(x => x.FileSizeBytes);
             var importAudioBytes = items.Where(x => x.Kind == "audio").Sum(x => x.FileSizeBytes);
-            var maxVideoBytes = GetLimitBytes("MaxStorageGB", 235);
-            var maxAudioBytes = GetLimitBytes("MaxAudioStorageGB", 15);
+            var maxVideoBytes = GetLimitBytes("MaxStorageGB", 280);
+            var maxAudioBytes = GetLimitBytes("MaxAudioStorageGB", 20);
             var available = GetAvailableSpace(GetVideoRoot());
             var newPlan = new MigrationPlan(sourceDatabase, items, consumeSource, cleanupRoot);
             var nothingToImport = consumeSource && missing.Count == 0 && items.Count == 0;
@@ -286,8 +286,8 @@ public sealed class ArchiveMigrationService
             var totals = await ReadCurrentTotalsAsync(targetDatabase, token);
             var importVideoBytes = selectedPlan.Items.Where(x => x.Kind == "video").Sum(x => x.FileSizeBytes);
             var importAudioBytes = selectedPlan.Items.Where(x => x.Kind == "audio").Sum(x => x.FileSizeBytes);
-            var overCapacity = totals.VideoBytes + importVideoBytes > GetLimitBytes("MaxStorageGB", 235) ||
-                totals.AudioBytes + importAudioBytes > GetLimitBytes("MaxAudioStorageGB", 15);
+            var overCapacity = totals.VideoBytes + importVideoBytes > GetLimitBytes("MaxStorageGB", 280) ||
+                totals.AudioBytes + importAudioBytes > GetLimitBytes("MaxAudioStorageGB", 20);
             if (overCapacity && !allowOverCapacity)
                 throw new InvalidOperationException("The archive size changed and now exceeds a configured limit. Scan again.");
 
