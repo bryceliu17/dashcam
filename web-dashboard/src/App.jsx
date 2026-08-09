@@ -797,6 +797,12 @@ function AudioSessionPlayback({ session }) {
   const currentRecordingEntry = timeline.recordingEntries[recordingIndex]
   const displayedPosition = scrubPosition ?? sessionPosition
   const displayedRecordingTime = gapEntry ? 0 : Math.max(0, displayedPosition - currentRecordingEntry.start)
+  const displayedRecordedTime = gapEntry
+    ? formatPlaybackTimestamp(
+        recordings[gapEntry.afterRecordingIndex].endTime,
+        Math.max(0, displayedPosition - gapEntry.start),
+      )
+    : formatPlaybackTimestamp(recording.startTime, displayedRecordingTime)
   const waveformReferencePeak = useMemo(() => {
     const visiblePeaks = Object.values(waveforms).flat()
       .map(peak => Math.abs(Number(peak)))
@@ -1095,6 +1101,7 @@ function AudioSessionPlayback({ session }) {
       <div className="video-control-row">
         <button type="button" className="playback-control" onClick={togglePlayback} aria-label={playing ? 'Pause' : 'Play'} title={playing ? 'Pause' : 'Play'}><Icon name={playing ? 'pause' : 'play'} /></button>
         <span>{formatTimelineDuration(displayedPosition)} / {formatTimelineDuration(timeline.duration)}</span>
+        <span className="playback-timestamp"><small>Recorded time</small><strong>{displayedRecordedTime}</strong></span>
         <select className="playback-rate" value={playbackRate} onChange={changePlaybackRate} aria-label="Playback speed" title="Playback speed">
           {[0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].map(rate => <option value={rate} key={rate}>{rate}x</option>)}
         </select>
@@ -1113,6 +1120,27 @@ function LiveViewer({ device, onClose }) {
   const playerRef = useRef(null)
   const stageRef = useRef(null)
   const imageRef = useRef(null)
+  const onCloseRef = useRef(onClose)
+  const hiddenStopSentRef = useRef(false)
+
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
+
+  useEffect(() => {
+    const stopForHiddenPage = () => {
+      if (hiddenStopSentRef.current) return
+      hiddenStopSentRef.current = true
+      onCloseRef.current({ keepalive: true, suppressError: true })
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') stopForHiddenPage()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('pagehide', stopForHiddenPage)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('pagehide', stopForHiddenPage)
+    }
+  }, [device.deviceId])
 
   const updateLayout = useCallback(() => {
     const stage = stageRef.current
@@ -1351,6 +1379,7 @@ export default function App() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [migrationBusy, setMigrationBusy] = useState(false)
   const migrationUploadAbort = useRef(null)
+  const rotationRequests = useRef(new Set())
 
   useEffect(() => {
     try {
@@ -1441,7 +1470,7 @@ export default function App() {
     videos.forEach((video, index) => {
       sessionDurationSeconds += Number(video.durationSeconds) || 0
       const nextGapSeconds = index < videos.length - 1 ? videoGapSeconds(video, videos[index + 1]) : null
-      if (index === videos.length - 1 || nextGapSeconds > 5) {
+      if (index === videos.length - 1 || nextGapSeconds > 10) {
         const sessionVideos = videos.slice(sessionStartIndex, index + 1).reverse()
         const gapDurationSeconds = sessionVideos.slice(0, -1).reduce((total, clip, clipIndex) =>
           total + (videoGapSeconds(sessionVideos[clipIndex + 1], clip) || 0), 0)
@@ -1502,16 +1531,20 @@ export default function App() {
     } catch (err) { setError(err.message) }
   }
 
-  const stopLive = async (deviceId) => {
+  const stopLive = useCallback(async (deviceId, options = {}) => {
+    const { keepalive = false, suppressError = false } = options
     setLiveDeviceId(null)
     try {
       const updated = await api(`/api/devices/${encodeURIComponent(deviceId)}/live`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: false }),
+        keepalive,
       })
       setDevices(items => items.map(item => item.deviceId === updated.deviceId ? updated : item))
-    } catch (err) { setError(err.message) }
-  }
+    } catch (err) {
+      if (!suppressError) setError(err.message)
+    }
+  }, [])
 
   const toggleLock = async (video) => {
     try {
@@ -1554,15 +1587,31 @@ export default function App() {
   }
 
   const rotatePlayback = async (video) => {
+    if (rotationRequests.current.has(video.id)) return
+    rotationRequests.current.add(video.id)
     const playbackRotationDegrees = ((video.playbackRotationDegrees || 0) + 90) % 360
+    const optimistic = { ...video, playbackRotationDegrees }
+    const updateVideoState = updated => {
+      setVideos(items => items.map(item => item.id === updated.id ? updated : item))
+      setSelected(current => current?.id === updated.id ? updated : current)
+      setSelectedSession(current => current ? {
+        ...current,
+        videos: current.videos.map(item => item.id === updated.id ? updated : item),
+      } : current)
+    }
+    updateVideoState(optimistic)
     try {
       const updated = await api(`/api/videos/${video.id}/rotation`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ playbackRotationDegrees }),
       })
-      setVideos(items => items.map(item => item.id === updated.id ? updated : item))
-      if (selected?.id === updated.id) setSelected(updated)
-    } catch (err) { setError(err.message) }
+      updateVideoState(updated)
+    } catch (err) {
+      updateVideoState(video)
+      setError(err.message)
+    } finally {
+      rotationRequests.current.delete(video.id)
+    }
   }
 
   const toggleSelection = (setIds, id) => setIds(current => {
@@ -1817,7 +1866,7 @@ export default function App() {
             <thead><tr><th>Device</th><th>Status</th><th>Last IP</th><th>Battery</th><th>Power</th><th>Activity</th><th>Software</th><th>Last seen</th><th>Live</th></tr></thead>
             <tbody>{devices.map(device => <tr key={device.deviceId}>
               <td className="device-name"><strong>{device.deviceName}</strong><small>{device.manufacturer} {device.model}</small></td>
-              <td><span className={`device-status ${device.online ? 'online' : 'offline'}`}><i />{device.online ? 'Online' : 'Offline'}</span></td>
+              <td><span className={`device-status ${device.online ? 'online' : 'offline'}`}><i />{device.online ? `Online (${device.onlineSource === 'websocket' ? 'WebSocket' : 'HTTP'})` : 'Offline'}</span></td>
               <td><code className="device-ip">{device.ipAddress || 'Unavailable'}</code></td>
               <td>
                 <div className="battery-value"><span>{device.batteryLevel}%</span><div><i style={{ width: `${device.batteryLevel}%` }} /></div></div>
@@ -1961,6 +2010,6 @@ export default function App() {
       <AudioSessionPlayback key={selectedAudioSession.number} session={selectedAudioSession} />
       <p>{formatDate(selectedAudioSession.recordings[0].startTime)} to {formatDate(selectedAudioSession.recordings.at(-1).endTime)} | {formatTotalDuration(selectedAudioSession.durationSeconds)} including short silent intervals</p>
     </div></div>}
-    {liveDevice && <LiveViewer device={liveDevice} onClose={() => stopLive(liveDevice.deviceId)} />}
+    {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} />}
   </div>
 }

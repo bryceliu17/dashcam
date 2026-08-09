@@ -19,6 +19,7 @@ public sealed class DeviceStatus
     public bool LiveRequested { get; set; }
     public bool LiveStreaming { get; set; }
     public required string LiveError { get; set; }
+    public required string LastSeenTransport { get; set; }
     public DateTime LastSeenAt { get; set; }
     public DateTime FirstSeenAt { get; set; }
 }

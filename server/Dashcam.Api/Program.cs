@@ -89,6 +89,7 @@ app.MapGet("/api/devices/socket", async (
     DashcamDbContext db,
     DeviceWebSocketHub sockets,
     LiveFrameStore liveFrames,
+    IServiceScopeFactory serviceScopeFactory,
     CancellationToken cancellationToken) =>
 {
     if (!context.WebSockets.IsWebSocketRequest)
@@ -125,7 +126,34 @@ app.MapGet("/api/devices/socket", async (
     }
 
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
-    await sockets.RunDeviceAsync(deviceId, socket, device.LiveRequested, cancellationToken);
+    var remoteIpAddress = NormalizeIpAddress(context.Connection.RemoteIpAddress?.ToString());
+    await sockets.RunDeviceAsync(
+        deviceId,
+        socket,
+        device.LiveRequested,
+        async (message, messageCancellationToken) =>
+        {
+            var heartbeat = ParseSocketHeartbeat(message);
+            var reportedDeviceId = CleanRequiredText(heartbeat?.DeviceId, 128);
+            var deviceName = CleanRequiredText(heartbeat?.DeviceName, 160);
+            if (heartbeat is null || reportedDeviceId != deviceId || deviceName is null ||
+                heartbeat.BatteryLevel is < 0 or > 100)
+                return;
+
+            await using var messageScope = serviceScopeFactory.CreateAsyncScope();
+            var messageDb = messageScope.ServiceProvider.GetRequiredService<DashcamDbContext>();
+            await ApplyDeviceHeartbeatAsync(
+                heartbeat,
+                deviceId,
+                deviceName,
+                remoteIpAddress,
+                "websocket",
+                messageDb,
+                liveFrames,
+                messageCancellationToken);
+            await messageDb.SaveChangesAsync(messageCancellationToken);
+        },
+        cancellationToken);
 });
 
 app.MapPost("/api/devices/heartbeat", async (
@@ -142,69 +170,15 @@ app.MapPost("/api/devices/heartbeat", async (
         return Results.BadRequest(new { error = "deviceId, deviceName and a batteryLevel from 0 to 100 are required." });
 
     var now = DateTime.UtcNow;
-    var ipAddress = NormalizeIpAddress(request.IpAddress)
-        ?? NormalizeIpAddress(httpContext.Connection.RemoteIpAddress?.ToString())
-        ?? string.Empty;
-    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
-    if (device is null)
-    {
-        device = new DeviceStatus
-        {
-            DeviceId = deviceId,
-            DeviceName = deviceName,
-            Manufacturer = CleanOptionalText(request.Manufacturer, 80),
-            Model = CleanOptionalText(request.Model, 120),
-            AndroidVersion = CleanOptionalText(request.AndroidVersion, 80),
-            AppVersion = CleanOptionalText(request.AppVersion, 40),
-            IpAddress = ipAddress,
-            BatteryLevel = request.BatteryLevel,
-            IsCharging = request.IsCharging,
-            ChargingSource = CleanOptionalText(request.ChargingSource, 32),
-            PowerSaveMode = request.PowerSaveMode,
-            VideoRecordingActive = request.VideoRecordingActive,
-            AudioRecordingActive = request.AudioRecordingActive,
-            LiveAccessEnabled = request.LiveAccessEnabled,
-            LiveRequested = false,
-            LiveStreaming = request.LiveStreaming,
-            LiveError = CleanOptionalText(request.LiveError, 500),
-            LastSeenAt = now,
-            FirstSeenAt = now
-        };
-        db.DeviceStatuses.Add(device);
-    }
-    else
-    {
-        device.DeviceName = deviceName;
-        device.Manufacturer = CleanOptionalText(request.Manufacturer, 80);
-        device.Model = CleanOptionalText(request.Model, 120);
-        device.AndroidVersion = CleanOptionalText(request.AndroidVersion, 80);
-        device.AppVersion = CleanOptionalText(request.AppVersion, 40);
-        device.IpAddress = ipAddress;
-        device.BatteryLevel = request.BatteryLevel;
-        device.IsCharging = request.IsCharging;
-        device.ChargingSource = CleanOptionalText(request.ChargingSource, 32);
-        device.PowerSaveMode = request.PowerSaveMode;
-        device.VideoRecordingActive = request.VideoRecordingActive;
-        device.AudioRecordingActive = request.AudioRecordingActive;
-        device.LiveAccessEnabled = request.LiveAccessEnabled;
-        device.LiveStreaming = request.LiveStreaming;
-        device.LiveError = CleanOptionalText(request.LiveError, 500);
-        device.LastSeenAt = now;
-    }
-    if (!request.LiveAccessEnabled || request.VideoRecordingActive || request.AudioRecordingActive)
-    {
-        device.LiveRequested = false;
-        device.LiveStreaming = false;
-        liveFrames.Remove(deviceId);
-    }
-    else if (device.LiveRequested &&
-        !liveFrames.HasRecentViewer(deviceId, TimeSpan.FromSeconds(10)))
-    {
-        device.LiveRequested = false;
-        device.LiveStreaming = false;
-        device.LiveError = string.Empty;
-        liveFrames.Remove(deviceId);
-    }
+    var device = await ApplyDeviceHeartbeatAsync(
+        request,
+        deviceId,
+        deviceName,
+        NormalizeIpAddress(httpContext.Connection.RemoteIpAddress?.ToString()),
+        "http",
+        db,
+        liveFrames,
+        cancellationToken);
 
     await db.SaveChangesAsync(cancellationToken);
     return Results.Ok(ToDeviceResponse(device, now));
@@ -1226,6 +1200,7 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
             LiveRequested INTEGER NOT NULL DEFAULT 0,
             LiveStreaming INTEGER NOT NULL DEFAULT 0,
             LiveError TEXT NOT NULL DEFAULT '',
+            LastSeenTransport TEXT NOT NULL DEFAULT 'http',
             LastSeenAt TEXT NOT NULL,
             FirstSeenAt TEXT NOT NULL
         )
@@ -1237,6 +1212,7 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveRequested", "INTEGER NOT NULL DEFAULT 0");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveStreaming", "INTEGER NOT NULL DEFAULT 0");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveError", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "DeviceStatuses", "LastSeenTransport", "TEXT NOT NULL DEFAULT 'http'");
 }
 
 static async Task EnsureColumnAsync(DashcamDbContext db, string table, string column, string definition)
@@ -1356,8 +1332,13 @@ static object ToAudioResponse(AudioRecording audio) => new
     streamUrl = $"/api/audio/{audio.Id}/stream"
 };
 
-static object ToDeviceResponse(DeviceStatus device, DateTime now, bool? socketConnected = null) => new
+static object ToDeviceResponse(DeviceStatus device, DateTime now, bool? socketConnected = null)
 {
+    var httpOnline = string.Equals(device.LastSeenTransport, "http", StringComparison.OrdinalIgnoreCase) &&
+        now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds);
+    var online = socketConnected == true || (socketConnected != true && httpOnline);
+    return new
+    {
     device.DeviceId,
     device.DeviceName,
     device.Manufacturer,
@@ -1375,11 +1356,109 @@ static object ToDeviceResponse(DeviceStatus device, DateTime now, bool? socketCo
     device.LiveRequested,
     device.LiveStreaming,
     device.LiveError,
-    Online = socketConnected ??
-        (now - AsUtc(device.LastSeenAt) <= TimeSpan.FromSeconds(DeviceOnlineThresholdSeconds)),
+    Online = online,
+    OnlineSource = socketConnected == true ? "websocket" : httpOnline ? "http" : null,
     LastSeenAt = AsUtc(device.LastSeenAt),
     FirstSeenAt = AsUtc(device.FirstSeenAt)
-};
+    };
+}
+
+static DeviceHeartbeatRequest? ParseSocketHeartbeat(string message)
+{
+    try
+    {
+        using var document = JsonDocument.Parse(message);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("type", out var type) || type.GetString() != "device_status" ||
+            !root.TryGetProperty("status", out var status))
+            return null;
+        return JsonSerializer.Deserialize<DeviceHeartbeatRequest>(status.GetRawText(), new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+    }
+    catch (JsonException)
+    {
+        return null;
+    }
+}
+
+static async Task<DeviceStatus> ApplyDeviceHeartbeatAsync(
+    DeviceHeartbeatRequest request,
+    string deviceId,
+    string deviceName,
+    string? remoteIpAddress,
+    string transport,
+    DashcamDbContext db,
+    LiveFrameStore liveFrames,
+    CancellationToken cancellationToken)
+{
+    var now = DateTime.UtcNow;
+    var ipAddress = NormalizeIpAddress(request.IpAddress) ?? remoteIpAddress ?? string.Empty;
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null)
+    {
+        device = new DeviceStatus
+        {
+            DeviceId = deviceId,
+            DeviceName = deviceName,
+            Manufacturer = CleanOptionalText(request.Manufacturer, 80),
+            Model = CleanOptionalText(request.Model, 120),
+            AndroidVersion = CleanOptionalText(request.AndroidVersion, 80),
+            AppVersion = CleanOptionalText(request.AppVersion, 40),
+            IpAddress = ipAddress,
+            BatteryLevel = request.BatteryLevel,
+            IsCharging = request.IsCharging,
+            ChargingSource = CleanOptionalText(request.ChargingSource, 32),
+            PowerSaveMode = request.PowerSaveMode,
+            VideoRecordingActive = request.VideoRecordingActive,
+            AudioRecordingActive = request.AudioRecordingActive,
+            LiveAccessEnabled = request.LiveAccessEnabled,
+            LiveRequested = false,
+            LiveStreaming = request.LiveStreaming,
+            LiveError = CleanOptionalText(request.LiveError, 500),
+            LastSeenTransport = transport,
+            LastSeenAt = now,
+            FirstSeenAt = now
+        };
+        db.DeviceStatuses.Add(device);
+    }
+    else
+    {
+        device.DeviceName = deviceName;
+        device.Manufacturer = CleanOptionalText(request.Manufacturer, 80);
+        device.Model = CleanOptionalText(request.Model, 120);
+        device.AndroidVersion = CleanOptionalText(request.AndroidVersion, 80);
+        device.AppVersion = CleanOptionalText(request.AppVersion, 40);
+        device.IpAddress = ipAddress;
+        device.BatteryLevel = request.BatteryLevel;
+        device.IsCharging = request.IsCharging;
+        device.ChargingSource = CleanOptionalText(request.ChargingSource, 32);
+        device.PowerSaveMode = request.PowerSaveMode;
+        device.VideoRecordingActive = request.VideoRecordingActive;
+        device.AudioRecordingActive = request.AudioRecordingActive;
+        device.LiveAccessEnabled = request.LiveAccessEnabled;
+        device.LiveStreaming = request.LiveStreaming;
+        device.LiveError = CleanOptionalText(request.LiveError, 500);
+        device.LastSeenTransport = transport;
+        device.LastSeenAt = now;
+    }
+
+    if (!request.LiveAccessEnabled || request.VideoRecordingActive || request.AudioRecordingActive)
+    {
+        device.LiveRequested = false;
+        device.LiveStreaming = false;
+        liveFrames.Remove(deviceId);
+    }
+    else if (device.LiveRequested && !liveFrames.HasRecentViewer(deviceId, TimeSpan.FromSeconds(10)))
+    {
+        device.LiveRequested = false;
+        device.LiveStreaming = false;
+        device.LiveError = string.Empty;
+        liveFrames.Remove(deviceId);
+    }
+    return device;
+}
 
 static string? CleanRequiredText(string? value, int maxLength)
 {

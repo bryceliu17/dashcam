@@ -28,6 +28,7 @@ object DeviceStatusReporter {
     private const val REPORT_INTERVAL_MS = 60_000L
     private val started = AtomicBoolean(false)
     private val serverReachable = AtomicReference<Boolean?>(null)
+    private val webSocketStatusSender = AtomicReference<((DeviceHeartbeat) -> Boolean)?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun start(context: Context) {
@@ -43,11 +44,23 @@ object DeviceStatusReporter {
 
     fun reportNow(context: Context): DeviceControl? {
         val appContext = context.applicationContext
+        val status = readStatus(context)
+        val socketSender = webSocketStatusSender.get()
+        if (socketSender != null) {
+            try {
+                if (socketSender(status)) {
+                    updateServerReachability(appContext, true)
+                    return DeviceControl(liveRequested = false)
+                }
+            } catch (error: Exception) {
+                Log.d(TAG, "WebSocket device status deferred: ${error.message.orEmpty()}")
+            }
+        }
         return try {
             val serverUrl = context.getSharedPreferences(UploadWorker.PREFS, Context.MODE_PRIVATE)
                 .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
                 ?: UploadWorker.DEFAULT_SERVER_URL
-            ServerClient(serverUrl).reportDeviceStatus(readStatus(context)).also {
+            ServerClient(serverUrl).reportDeviceStatus(status).also {
                 updateServerReachability(appContext, true)
             }
         } catch (error: Exception) {
@@ -55,6 +68,10 @@ object DeviceStatusReporter {
             Log.d(TAG, "Device status heartbeat deferred: ${error.message.orEmpty()}")
             null
         }
+    }
+
+    fun setWebSocketStatusSender(sender: ((DeviceHeartbeat) -> Boolean)?) {
+        webSocketStatusSender.set(sender)
     }
 
     private fun updateServerReachability(context: Context, reachable: Boolean) {

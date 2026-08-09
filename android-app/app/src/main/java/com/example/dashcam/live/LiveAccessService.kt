@@ -28,6 +28,7 @@ import com.example.dashcam.MainActivity
 import com.example.dashcam.R
 import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.network.ServerClient
+import com.example.dashcam.network.toJson
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.upload.UploadWorker
 import kotlinx.coroutines.CoroutineScope
@@ -184,10 +185,16 @@ class LiveAccessService : Service() {
                     reconnectAttempt = 0
                 }
                 reconnectJob?.cancel()
+                DeviceStatusReporter.setWebSocketStatusSender { status ->
+                    webSocket.send(
+                        JSONObject()
+                            .put("type", "device_status")
+                            .put("status", status.toJson())
+                            .toString()
+                    )
+                }
                 scope.launch {
-                    DeviceStatusReporter.reportNow(this@LiveAccessService)?.let {
-                        applyLiveRequest(it.liveRequested)
-                    }
+                    DeviceStatusReporter.reportNow(this@LiveAccessService)
                 }
             }
 
@@ -219,9 +226,11 @@ class LiveAccessService : Service() {
             if (controlSocket === webSocket) controlSocket = null
             socketConnecting = false
         }
+        DeviceStatusReporter.setWebSocketStatusSender(null)
         scope.launch {
             liveRequested = false
             if (streaming || cameraStarting) stopStreaming("Live control connection lost")
+            DeviceStatusReporter.reportNow(this@LiveAccessService)
             scheduleReconnect()
         }
     }
@@ -246,6 +255,7 @@ class LiveAccessService : Service() {
             socketConnecting = false
             controlSocket.also { controlSocket = null }
         }
+        DeviceStatusReporter.setWebSocketStatusSender(null)
         socket?.close(1000, "Live Access disabled")
     }
 

@@ -30,6 +30,7 @@ public sealed class DeviceWebSocketHub
         string deviceId,
         WebSocket socket,
         bool initialLiveRequested,
+        Func<string, CancellationToken, Task> handleMessage,
         CancellationToken cancellationToken)
     {
         var connection = new DeviceConnection(socket);
@@ -42,7 +43,9 @@ public sealed class DeviceWebSocketHub
             await SendLiveRequestAsync(deviceId, initialLiveRequested, cancellationToken);
             while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
-                if (!await ReceiveTextAsync(socket, cancellationToken)) break;
+                var message = await ReceiveTextAsync(socket, cancellationToken);
+                if (message is null) break;
+                await handleMessage(message, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -103,13 +106,13 @@ public sealed class DeviceWebSocketHub
         }
     }
 
-    private static async Task<bool> ReceiveTextAsync(
+    private static async Task<string?> ReceiveTextAsync(
         WebSocket socket,
         CancellationToken cancellationToken)
     {
         var buffer = new byte[4096];
-        var receivedBytes = 0;
-        while (receivedBytes <= 128 * 1024)
+        using var message = new MemoryStream();
+        while (message.Length <= 128 * 1024)
         {
             var result = await socket.ReceiveAsync(buffer, cancellationToken);
             if (result.MessageType == WebSocketMessageType.Close)
@@ -119,16 +122,16 @@ public sealed class DeviceWebSocketHub
                         WebSocketCloseStatus.NormalClosure,
                         "Closing",
                         CancellationToken.None);
-                return false;
+                return null;
             }
-            if (result.MessageType != WebSocketMessageType.Text) return false;
-            receivedBytes += result.Count;
-            if (result.EndOfMessage) return true;
+            if (result.MessageType != WebSocketMessageType.Text) return null;
+            message.Write(buffer, 0, result.Count);
+            if (result.EndOfMessage) return Encoding.UTF8.GetString(message.ToArray());
         }
         await socket.CloseOutputAsync(
             WebSocketCloseStatus.MessageTooBig,
             "Message is too large",
             CancellationToken.None);
-        return false;
+        return null;
     }
 }
