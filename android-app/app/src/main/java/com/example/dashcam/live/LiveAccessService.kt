@@ -19,6 +19,7 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -39,10 +40,18 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class LiveAccessService : Service() {
@@ -51,6 +60,7 @@ class LiveAccessService : Service() {
     private lateinit var cameraThread: HandlerThread
     private lateinit var cameraHandler: Handler
     private var monitorJob: Job? = null
+    private var reconnectJob: Job? = null
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
@@ -60,6 +70,16 @@ class LiveAccessService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var liveClientUrl = ""
     private var liveClient: ServerClient? = null
+    private val socketClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .pingInterval(60, TimeUnit.SECONDS)
+        .build()
+    private val socketStateLock = Any()
+    private var socketGeneration = 0
+    private var socketConnecting = false
+    @Volatile private var controlSocket: WebSocket? = null
+    private var reconnectAttempt = 0
+    @Volatile private var liveRequested = false
     @Volatile private var cameraStarting = false
     @Volatile private var streaming = false
     private var lastLegacyFrameAt = 0L
@@ -102,6 +122,8 @@ class LiveAccessService : Service() {
         when (intent?.action) {
             ACTION_DISABLE -> {
                 LiveAccessSettings.setEnabled(this, false)
+                liveRequested = false
+                stopMonitoring()
                 stopStreaming()
                 broadcastState()
                 scope.launch { DeviceStatusReporter.reportNow(this@LiveAccessService) }
@@ -124,22 +146,130 @@ class LiveAccessService : Service() {
     private fun startMonitoring() {
         if (monitorJob?.isActive == true) return
         monitorJob = scope.launch {
+            DeviceStatusReporter.reportNow(this@LiveAccessService)?.let {
+                applyLiveRequest(it.liveRequested)
+            }
+            connectControlSocket()
             while (isActive && LiveAccessSettings.isEnabled(this@LiveAccessService)) {
                 val recording = PowerRecordingSettings.isAnyRecordingActive(this@LiveAccessService)
-                if (recording && (streaming || cameraStarting)) {
+                if (recording && (liveRequested || streaming || cameraStarting)) {
+                    liveRequested = false
                     stopStreaming("Live stopped because recording started")
+                    DeviceStatusReporter.reportNow(this@LiveAccessService)
                 }
-                val control = DeviceStatusReporter.reportNow(this@LiveAccessService)
-                when {
-                    control?.liveRequested == true && recording ->
-                        setError("Phone is recording")
-                    control?.liveRequested == true && !streaming && !cameraStarting ->
-                        startStreaming()
-                    control?.liveRequested == false && (streaming || cameraStarting) ->
-                        stopStreaming()
-                }
-                delay(CONTROL_INTERVAL_MS)
+                delay(SAFETY_INTERVAL_MS)
             }
+        }
+    }
+
+    private fun connectControlSocket() {
+        if (!LiveAccessSettings.isEnabled(this)) return
+        val generation = synchronized(socketStateLock) {
+            if (controlSocket != null || socketConnecting) return
+            socketConnecting = true
+            socketGeneration += 1
+            socketGeneration
+        }
+        val serverUrl = getSharedPreferences(UploadWorker.PREFS, Context.MODE_PRIVATE)
+            .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
+            ?: UploadWorker.DEFAULT_SERVER_URL
+        val socketBase = when {
+            serverUrl.startsWith("https://", ignoreCase = true) -> "wss://${serverUrl.substring(8)}"
+            serverUrl.startsWith("http://", ignoreCase = true) -> "ws://${serverUrl.substring(7)}"
+            else -> serverUrl
+        }.trimEnd('/')
+        val request = Request.Builder()
+            .url("$socketBase/api/devices/socket?deviceId=${Uri.encode(DeviceStatusReporter.deviceId(this))}")
+            .build()
+        socketClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                synchronized(socketStateLock) {
+                    if (generation != socketGeneration || !LiveAccessSettings.isEnabled(this@LiveAccessService)) {
+                        webSocket.close(1000, "Live Access disabled")
+                        return
+                    }
+                    socketConnecting = false
+                    controlSocket = webSocket
+                    reconnectAttempt = 0
+                }
+                reconnectJob?.cancel()
+                scope.launch {
+                    DeviceStatusReporter.reportNow(this@LiveAccessService)?.let {
+                        applyLiveRequest(it.liveRequested)
+                    }
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val message = try { JSONObject(text) } catch (_: Exception) { return }
+                scope.launch { handleControlMessage(message) }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                handleSocketDisconnected(generation, webSocket)
+            }
+
+            override fun onFailure(webSocket: WebSocket, error: Throwable, response: Response?) {
+                Log.d(TAG, "Live control WebSocket disconnected: ${error.message.orEmpty()}")
+                handleSocketDisconnected(generation, webSocket)
+            }
+        })
+    }
+
+    private fun handleSocketDisconnected(generation: Int, webSocket: WebSocket) {
+        synchronized(socketStateLock) {
+            if (generation != socketGeneration) return
+            if (controlSocket === webSocket) controlSocket = null
+            socketConnecting = false
+        }
+        scope.launch {
+            liveRequested = false
+            stopStreaming("Live control connection lost")
+            scheduleReconnect()
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (!LiveAccessSettings.isEnabled(this) || reconnectJob?.isActive == true) return
+        val delayMs = RECONNECT_DELAYS_MS[reconnectAttempt.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)]
+        reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)
+        reconnectJob = scope.launch {
+            delay(delayMs)
+            connectControlSocket()
+        }
+    }
+
+    private fun stopMonitoring() {
+        monitorJob?.cancel()
+        monitorJob = null
+        reconnectJob?.cancel()
+        reconnectJob = null
+        val socket = synchronized(socketStateLock) {
+            socketGeneration += 1
+            socketConnecting = false
+            controlSocket.also { controlSocket = null }
+        }
+        socket?.close(1000, "Live Access disabled")
+    }
+
+    private fun applyLiveRequest(enabled: Boolean) {
+        liveRequested = enabled
+        val recording = PowerRecordingSettings.isAnyRecordingActive(this)
+        when {
+            enabled && recording -> {
+                liveRequested = false
+                stopStreaming("Phone is recording")
+            }
+            !enabled -> stopStreaming()
+            enabled && !streaming && !cameraStarting -> startStreaming()
+            enabled -> setError(null)
+        }
+        scope.launch { DeviceStatusReporter.reportNow(this@LiveAccessService) }
+    }
+
+    private fun handleControlMessage(message: JSONObject) {
+        when (message.optString("type")) {
+            "live_request" -> applyLiveRequest(message.optBoolean("enabled", false))
         }
     }
 
@@ -489,9 +619,13 @@ class LiveAccessService : Service() {
     }
 
     override fun onDestroy() {
-        monitorJob?.cancel()
+        liveRequested = false
+        stopMonitoring()
         stopStreaming()
+        socketClient.dispatcher.cancelAll()
+        socketClient.connectionPool.evictAll()
         if (::cameraThread.isInitialized) cameraThread.quitSafely()
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -504,11 +638,12 @@ class LiveAccessService : Service() {
         const val EXTRA_ERROR = "error"
         private const val CHANNEL_ID = "dashcam_live_access"
         private const val NOTIFICATION_ID = 2004
-        private const val CONTROL_INTERVAL_MS = 15_000L
+        private const val SAFETY_INTERVAL_MS = 15_000L
         private const val FRAME_INTERVAL_MS = 125L
         private const val LEGACY_JPEG_QUALITY = 60
         private const val CAMERA_RELEASE_DELAY_MS = 300L
         private const val TAG = "LiveAccessService"
+        private val RECONNECT_DELAYS_MS = longArrayOf(5_000L, 15_000L, 30_000L, 60_000L)
 
         fun enable(context: Context) {
             ContextCompat.startForegroundService(
