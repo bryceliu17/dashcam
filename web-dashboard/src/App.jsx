@@ -1347,6 +1347,7 @@ function MigrationPanel({ migration, busy, folder, upload, onFolderSelected, onU
 }
 
 function BatteryTemperatureChart({ items = [], hours }) {
+  const [selectedIndex, setSelectedIndex] = useState(null)
   const width = 800
   const height = 310
   const margin = { left: 54, right: 18, top: 18, bottom: 38 }
@@ -1361,9 +1362,24 @@ function BatteryTemperatureChart({ items = [], hours }) {
   const y = value => margin.top + (maximum - value) / (maximum - minimum) * plotHeight
   const points = items.map(item => `${x(item.recordedAt).toFixed(1)},${y(item.temperatureTenthsC / 10).toFixed(1)}`).join(' ')
   const timeLabel = value => new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
+  const selected = selectedIndex == null ? null : items[selectedIndex]
+
+  useEffect(() => setSelectedIndex(null), [items, hours])
+
+  const selectNearestPoint = event => {
+    if (!items.length) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const svgX = (event.clientX - bounds.left) / bounds.width * width
+    const selectedTime = startTime + Math.max(0, Math.min(1, (svgX - margin.left) / plotWidth)) * (endTime - startTime)
+    let nearestIndex = 0
+    for (let index = 1; index < items.length; index += 1) {
+      if (Math.abs(items[index].recordedAt - selectedTime) < Math.abs(items[nearestIndex].recordedAt - selectedTime)) nearestIndex = index
+    }
+    setSelectedIndex(nearestIndex)
+  }
 
   return <div className="battery-chart-wrap">
-    <svg className="battery-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Battery temperature over ${hours} hours`}>
+    <svg className="battery-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Battery temperature over ${hours} hours`} onPointerDown={selectNearestPoint}>
       {[0, 1, 2, 3, 4].map(step => {
         const temperature = minimum + (maximum - minimum) * step / 4
         return <g key={step}><line x1={margin.left} x2={width - margin.right} y1={y(temperature)} y2={y(temperature)} className="chart-grid" /><text x={margin.left - 10} y={y(temperature) + 4} textAnchor="end">{temperature.toFixed(0)}°</text></g>
@@ -1374,8 +1390,15 @@ function BatteryTemperatureChart({ items = [], hours }) {
         return <text key={step} x={x(time)} y={height - 10} textAnchor="middle">{timeLabel(time)}</text>
       })}
       {points && <polyline points={points} className="chart-temperature-line" />}
+      {items.map((item, index) => <circle key={item.recordedAt} cx={x(item.recordedAt)} cy={y(item.temperatureTenthsC / 10)} r={index === selectedIndex ? 6 : 2.5} className={index === selectedIndex ? 'chart-point selected' : 'chart-point'} />)}
+      {selected && <line x1={x(selected.recordedAt)} x2={x(selected.recordedAt)} y1={margin.top} y2={height - margin.bottom} className="chart-selection-line" />}
     </svg>
     {!items.length && <div className="battery-chart-empty">No temperature samples in this range yet.</div>}
+    {selected && <div className="battery-selected-reading">
+      <strong>{formatDate(selected.recordedAt)}</strong>
+      <span>{(selected.temperatureTenthsC / 10).toFixed(1)}°C</span>
+      <small>Battery {selected.batteryLevel}% · {selected.isCharging ? 'Charging' : 'On battery'}{selected.videoRecordingActive ? ' · Video recording' : ''}{selected.audioRecordingActive ? ' · Audio recording' : ''}</small>
+    </div>}
   </div>
 }
 
