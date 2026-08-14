@@ -1389,7 +1389,7 @@ function BatteryHistoryModal({ state, onRange, onClose }) {
   return <div className="modal" onMouseDown={onClose}><div className="player battery-history-modal" onMouseDown={event => event.stopPropagation()}>
     <div><strong>{state.device.deviceName} battery temperature</strong><button className="close-player" aria-label="Close battery history" onClick={onClose}>X</button></div>
     <div className="battery-history-body">
-      <div className="battery-range-buttons">{[6, 24, 72].map(hours => <button key={hours} className={state.hours === hours ? 'active' : ''} onClick={() => onRange(hours)}>{hours === 72 ? '3 days' : `${hours} hours`}</button>)}</div>
+      <div className="battery-range-buttons">{[8, 24, 72].map(hours => <button key={hours} className={state.hours === hours ? 'active' : ''} onClick={() => onRange(hours)}>{hours === 72 ? '3 days' : `${hours} hours`}</button>)}</div>
       {state.loading ? <div className="battery-history-loading"><div className="spinner" /><span>Requesting local history from the phone…</span><small>With HTTP fallback this can take up to one minute.</small></div> : state.error ? <div className="battery-history-error">{state.error}</div> : <>
         <div className="battery-summary"><span>Current<strong>{value(current)}</strong></span><span>Minimum<strong>{value(minimum)}</strong></span><span>Maximum<strong>{value(maximum)}</strong></span><span>Average<strong>{value(average)}</strong></span></div>
         <BatteryTemperatureChart items={state.items} hours={state.hours} />

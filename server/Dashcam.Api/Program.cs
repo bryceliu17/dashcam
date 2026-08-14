@@ -206,7 +206,7 @@ app.MapGet("/api/devices/{deviceId}/battery-history", async (
 {
     if (!await db.DeviceStatuses.AnyAsync(device => device.DeviceId == deviceId, cancellationToken))
         return Results.NotFound(new { error = "Device not found." });
-    var requestedHours = (hours ?? 24) is 6 or 24 or 72 ? hours ?? 24 : 24;
+    var requestedHours = (hours ?? 24) is 8 or 24 or 72 ? hours ?? 24 : 24;
     try
     {
         var response = await batteryHistory.RequestAsync(
