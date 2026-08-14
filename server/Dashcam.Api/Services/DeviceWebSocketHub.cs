@@ -68,6 +68,16 @@ public sealed class DeviceWebSocketHub
         CancellationToken cancellationToken) =>
         SendJsonAsync(deviceId, new { type = "live_request", enabled }, cancellationToken);
 
+    public Task<bool> SendBatteryHistoryRequestAsync(
+        string deviceId,
+        string requestId,
+        int hours,
+        CancellationToken cancellationToken) =>
+        SendJsonAsync(
+            deviceId,
+            new { type = "battery_history_request", requestId, hours },
+            cancellationToken);
+
     private Task<bool> SendJsonAsync(
         string deviceId,
         object payload,
@@ -112,7 +122,7 @@ public sealed class DeviceWebSocketHub
     {
         var buffer = new byte[4096];
         using var message = new MemoryStream();
-        while (message.Length <= 128 * 1024)
+        while (message.Length <= 256 * 1024)
         {
             var result = await socket.ReceiveAsync(buffer, cancellationToken);
             if (result.MessageType == WebSocketMessageType.Close)

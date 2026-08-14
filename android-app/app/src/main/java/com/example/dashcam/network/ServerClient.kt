@@ -33,7 +33,11 @@ data class DeviceHeartbeat(
     val liveError: String
 )
 
-data class DeviceControl(val liveRequested: Boolean)
+data class BatteryHistoryRequest(val requestId: String, val hours: Int)
+data class DeviceControl(
+    val liveRequested: Boolean,
+    val batteryHistoryRequest: BatteryHistoryRequest? = null
+)
 
 fun DeviceHeartbeat.toJson(): JSONObject = JSONObject()
     .put("deviceId", deviceId)
@@ -149,7 +153,29 @@ class ServerClient(private val baseUrl: String) {
                 throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
             }
             val json = JSONObject(text)
-            return DeviceControl(json.optBoolean("liveRequested", false))
+            val history = json.optJSONObject("batteryHistoryRequest")?.let { request ->
+                val requestId = request.optString("requestId")
+                if (requestId.isBlank()) null else BatteryHistoryRequest(
+                    requestId,
+                    request.optInt("hours", 24).coerceIn(1, 72)
+                )
+            }
+            return DeviceControl(json.optBoolean("liveRequested", false), history)
+        }
+    }
+
+    fun sendBatteryHistoryResponse(deviceId: String, payload: JSONObject) {
+        val body = payload.toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("${cleanBase()}/api/devices/$deviceId/battery-history-response")
+            .header("Connection", "close")
+            .post(body)
+            .build()
+        heartbeatClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val text = response.body?.string().orEmpty()
+                throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
+            }
         }
     }
 

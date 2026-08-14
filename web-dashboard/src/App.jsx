@@ -1346,6 +1346,59 @@ function MigrationPanel({ migration, busy, folder, upload, onFolderSelected, onU
   </section>
 }
 
+function BatteryTemperatureChart({ items = [], hours }) {
+  const width = 800
+  const height = 310
+  const margin = { left: 54, right: 18, top: 18, bottom: 38 }
+  const plotWidth = width - margin.left - margin.right
+  const plotHeight = height - margin.top - margin.bottom
+  const temperatures = items.map(item => item.temperatureTenthsC / 10)
+  const minimum = Math.min(20, ...(temperatures.length ? temperatures.map(value => value - 2) : [20]))
+  const maximum = Math.max(50, ...(temperatures.length ? temperatures.map(value => value + 2) : [50]))
+  const endTime = Date.now()
+  const startTime = endTime - hours * 60 * 60 * 1000
+  const x = value => margin.left + Math.max(0, Math.min(1, (value - startTime) / (endTime - startTime))) * plotWidth
+  const y = value => margin.top + (maximum - value) / (maximum - minimum) * plotHeight
+  const points = items.map(item => `${x(item.recordedAt).toFixed(1)},${y(item.temperatureTenthsC / 10).toFixed(1)}`).join(' ')
+  const timeLabel = value => new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
+
+  return <div className="battery-chart-wrap">
+    <svg className="battery-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Battery temperature over ${hours} hours`}>
+      {[0, 1, 2, 3, 4].map(step => {
+        const temperature = minimum + (maximum - minimum) * step / 4
+        return <g key={step}><line x1={margin.left} x2={width - margin.right} y1={y(temperature)} y2={y(temperature)} className="chart-grid" /><text x={margin.left - 10} y={y(temperature) + 4} textAnchor="end">{temperature.toFixed(0)}°</text></g>
+      })}
+      {[40, 45].map(temperature => temperature >= minimum && temperature <= maximum && <line key={temperature} x1={margin.left} x2={width - margin.right} y1={y(temperature)} y2={y(temperature)} className={temperature === 45 ? 'chart-limit danger' : 'chart-limit warning'} />)}
+      {[0, 1, 2, 3].map(step => {
+        const time = startTime + (endTime - startTime) * step / 3
+        return <text key={step} x={x(time)} y={height - 10} textAnchor="middle">{timeLabel(time)}</text>
+      })}
+      {points && <polyline points={points} className="chart-temperature-line" />}
+    </svg>
+    {!items.length && <div className="battery-chart-empty">No temperature samples in this range yet.</div>}
+  </div>
+}
+
+function BatteryHistoryModal({ state, onRange, onClose }) {
+  const temperatures = state.items.map(item => item.temperatureTenthsC / 10)
+  const current = temperatures.at(-1)
+  const minimum = temperatures.length ? Math.min(...temperatures) : null
+  const maximum = temperatures.length ? Math.max(...temperatures) : null
+  const average = temperatures.length ? temperatures.reduce((sum, value) => sum + value, 0) / temperatures.length : null
+  const value = number => number == null ? '--' : `${number.toFixed(1)}°C`
+  return <div className="modal" onMouseDown={onClose}><div className="player battery-history-modal" onMouseDown={event => event.stopPropagation()}>
+    <div><strong>{state.device.deviceName} battery temperature</strong><button className="close-player" aria-label="Close battery history" onClick={onClose}>X</button></div>
+    <div className="battery-history-body">
+      <div className="battery-range-buttons">{[6, 24, 72].map(hours => <button key={hours} className={state.hours === hours ? 'active' : ''} onClick={() => onRange(hours)}>{hours === 72 ? '3 days' : `${hours} hours`}</button>)}</div>
+      {state.loading ? <div className="battery-history-loading"><div className="spinner" /><span>Requesting local history from the phone…</span><small>With HTTP fallback this can take up to one minute.</small></div> : state.error ? <div className="battery-history-error">{state.error}</div> : <>
+        <div className="battery-summary"><span>Current<strong>{value(current)}</strong></span><span>Minimum<strong>{value(minimum)}</strong></span><span>Maximum<strong>{value(maximum)}</strong></span><span>Average<strong>{value(average)}</strong></span></div>
+        <BatteryTemperatureChart items={state.items} hours={state.hours} />
+        <p className="battery-history-note">{state.items.length} local samples. Orange: 40°C, red: 45°C. The server does not retain this history.</p>
+      </>}
+    </div>
+  </div></div>
+}
+
 export default function App() {
   const [videos, setVideos] = useState([])
   const [audio, setAudio] = useState([])
@@ -1360,6 +1413,7 @@ export default function App() {
   const [selectedAudio, setSelectedAudio] = useState(null)
   const [selectedAudioSession, setSelectedAudioSession] = useState(null)
   const [liveDeviceId, setLiveDeviceId] = useState(null)
+  const [batteryHistory, setBatteryHistory] = useState(null)
   const [archiveType, setArchiveType] = useState('video')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -1380,6 +1434,23 @@ export default function App() {
   const [migrationBusy, setMigrationBusy] = useState(false)
   const migrationUploadAbort = useRef(null)
   const rotationRequests = useRef(new Set())
+  const batteryHistoryRequest = useRef(0)
+
+  const loadBatteryHistory = async (device, hours = 24) => {
+    const generation = ++batteryHistoryRequest.current
+    setBatteryHistory({ device, hours, items: [], loading: true, error: '' })
+    try {
+      const result = await api(`/api/devices/${encodeURIComponent(device.deviceId)}/battery-history?hours=${hours}`)
+      if (generation === batteryHistoryRequest.current) setBatteryHistory({ device, hours, items: result.items || [], loading: false, error: '' })
+    } catch (err) {
+      if (generation === batteryHistoryRequest.current) setBatteryHistory({ device, hours, items: [], loading: false, error: err.message })
+    }
+  }
+
+  const closeBatteryHistory = () => {
+    batteryHistoryRequest.current += 1
+    setBatteryHistory(null)
+  }
 
   useEffect(() => {
     try {
@@ -1870,6 +1941,7 @@ export default function App() {
               <td><code className="device-ip">{device.ipAddress || 'Unavailable'}</code></td>
               <td>
                 <div className="battery-value"><span>{device.batteryLevel}%</span><div><i style={{ width: `${device.batteryLevel}%` }} /></div></div>
+                <button className="battery-history-button" disabled={!device.online} onClick={() => loadBatteryHistory(device)}>Temperature history</button>
               </td>
               <td><span>{device.isCharging ? `${device.chargingSource} charging` : 'On battery'}</span><small className={device.powerSaveMode ? 'power-save active' : 'power-save'}>{device.powerSaveMode ? 'Power saving' : 'Normal power'}</small></td>
               <td>{device.liveStreaming ? 'Live streaming' : device.videoRecordingActive ? 'Video recording' : device.audioRecordingActive ? 'Audio recording' : 'Idle'}</td>
@@ -2011,5 +2083,6 @@ export default function App() {
       <p>{formatDate(selectedAudioSession.recordings[0].startTime)} to {formatDate(selectedAudioSession.recordings.at(-1).endTime)} | {formatTotalDuration(selectedAudioSession.durationSeconds)} including short silent intervals</p>
     </div></div>}
     {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} />}
+    {batteryHistory && <BatteryHistoryModal state={batteryHistory} onRange={hours => loadBatteryHistory(batteryHistory.device, hours)} onClose={closeBatteryHistory} />}
   </div>
 }

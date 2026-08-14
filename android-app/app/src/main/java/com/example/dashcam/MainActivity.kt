@@ -56,6 +56,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.example.dashcam.data.AudioEntity
+import com.example.dashcam.data.BatteryTemperatureSample
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.data.UploadStatus
 import com.example.dashcam.data.VideoEntity
@@ -72,6 +73,7 @@ import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.StoragePolicy
 import com.example.dashcam.recording.VolumeKeyAccessibilityService
 import com.example.dashcam.upload.UploadWorker
+import com.example.dashcam.battery.BatteryTemperatureChartView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -107,6 +109,7 @@ class MainActivity : ComponentActivity() {
     private var showingVideoManager = false
     private var showingVideoList = false
     private var showingAudioList = false
+    private var showingBatteryHistory = false
     private var audioListLoadGeneration = 0
     private var returnToVideoListAfterManager = false
     private var restoreVideoListScroll = false
@@ -306,6 +309,9 @@ class MainActivity : ComponentActivity() {
                     showingAudioList = false
                     stopAudioPlayback()
                     buildUi()
+                } else if (showingBatteryHistory) {
+                    showingBatteryHistory = false
+                    buildUi()
                 } else {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
@@ -329,7 +335,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!showingVideoList && !showingVideoManager && !showingAudioList) {
+        if (!showingVideoList && !showingVideoManager && !showingAudioList && !showingBatteryHistory) {
             refreshHomeStatus()
         } else {
             updateModeButtons()
@@ -358,6 +364,7 @@ class MainActivity : ComponentActivity() {
     private fun buildUi() {
         showingVideoList = false
         showingAudioList = false
+        showingBatteryHistory = false
         returnToVideoListAfterManager = false
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(244, 244, 240))
@@ -523,9 +530,87 @@ class MainActivity : ComponentActivity() {
             startManualVideoUpload()
         }, weighted().apply { marginStart = dp(8) })
         root.addView(uploadTypeControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(actionButton("Battery Temperature") {
+            showBatteryTemperatureHistory(24)
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         scroll.addView(root)
         setContentView(scroll)
         refreshHomeStatus()
+    }
+
+    private fun showBatteryTemperatureHistory(hours: Int) {
+        showingBatteryHistory = true
+        showingVideoList = false
+        showingAudioList = false
+        showingVideoManager = false
+        val scroll = ScrollView(this).apply { setBackgroundColor(Color.rgb(244, 244, 240)) }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        root.addView(TextView(this).apply {
+            text = "Battery temperature"
+            textSize = 27f
+            setTextColor(Color.rgb(17, 24, 39))
+        })
+        root.addView(TextView(this).apply {
+            text = "Measured every 5 minutes and kept on this phone for 3 days."
+            textSize = 13f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(4), 0, dp(12))
+        })
+        val rangeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        listOf(6, 24, 72).forEach { range ->
+            rangeRow.addView(actionButton(if (range == 72) "3 days" else "$range hours") {
+                showBatteryTemperatureHistory(range)
+            }, weighted().apply { if (range != 6) marginStart = dp(6) })
+        }
+        root.addView(rangeRow, LinearLayout.LayoutParams(-1, dp(46)))
+        val summary = TextView(this).apply {
+            text = "Loading…"
+            textSize = 15f
+            setTextColor(Color.rgb(31, 41, 55))
+            setPadding(0, dp(14), 0, dp(10))
+        }
+        root.addView(summary)
+        val chart = BatteryTemperatureChartView(this)
+        root.addView(chart, LinearLayout.LayoutParams(-1, dp(300)))
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        controls.addView(actionButton("Back") {
+            showingBatteryHistory = false
+            buildUi()
+        }, weighted())
+        controls.addView(actionButton("Refresh") {
+            showBatteryTemperatureHistory(hours)
+        }, weighted().apply { marginStart = dp(8) })
+        root.addView(controls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
+        scroll.addView(root)
+        setContentView(scroll)
+
+        lifecycleScope.launch {
+            val samples = withContext(Dispatchers.IO) {
+                DashcamDatabase.get(this@MainActivity).batteryTemperatureDao()
+                    .samplesSince(System.currentTimeMillis() - hours * 60L * 60_000L)
+            }
+            if (!showingBatteryHistory) return@launch
+            chart.setSamples(samples, hours)
+            summary.text = batteryTemperatureSummary(samples)
+        }
+    }
+
+    private fun batteryTemperatureSummary(samples: List<BatteryTemperatureSample>): String {
+        if (samples.isEmpty()) return "No samples yet. The first sample is recorded when the app starts."
+        val values = samples.map { it.temperatureTenthsC / 10.0 }
+        val current = values.last()
+        return String.format(
+            Locale.getDefault(),
+            "Current %.1f°C   Minimum %.1f°C   Maximum %.1f°C   Average %.1f°C\n%d samples",
+            current,
+            values.minOrNull() ?: current,
+            values.maxOrNull() ?: current,
+            values.average(),
+            values.size
+        )
     }
 
     private fun showLocalVideos() {

@@ -19,6 +19,7 @@ var connectionString = builder.Configuration.GetConnectionString("DashcamDatabas
 builder.Services.AddDbContext<DashcamDbContext>(options => options.UseSqlite(connectionString));
 builder.Services.AddSingleton<LiveFrameStore>();
 builder.Services.AddSingleton<DeviceWebSocketHub>();
+builder.Services.AddSingleton<BatteryHistoryBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveMigrationService>();
 builder.Services.AddSingleton<MigrationUploadService>();
@@ -88,6 +89,7 @@ app.MapGet("/api/devices/socket", async (
     HttpContext context,
     DashcamDbContext db,
     DeviceWebSocketHub sockets,
+    BatteryHistoryBroker batteryHistory,
     LiveFrameStore liveFrames,
     IServiceScopeFactory serviceScopeFactory,
     CancellationToken cancellationToken) =>
@@ -133,6 +135,12 @@ app.MapGet("/api/devices/socket", async (
         device.LiveRequested,
         async (message, messageCancellationToken) =>
         {
+            var historyResponse = ParseBatteryHistoryResponse(message);
+            if (historyResponse is not null)
+            {
+                batteryHistory.TryComplete(deviceId, historyResponse);
+                return;
+            }
             var heartbeat = ParseSocketHeartbeat(message);
             var reportedDeviceId = CleanRequiredText(heartbeat?.DeviceId, 128);
             var deviceName = CleanRequiredText(heartbeat?.DeviceName, 160);
@@ -162,6 +170,7 @@ app.MapPost("/api/devices/heartbeat", async (
     DashcamDbContext db,
     LiveFrameStore liveFrames,
     DeviceWebSocketHub sockets,
+    BatteryHistoryBroker batteryHistory,
     CancellationToken cancellationToken) =>
 {
     var deviceId = CleanRequiredText(request.DeviceId, 128);
@@ -169,7 +178,6 @@ app.MapPost("/api/devices/heartbeat", async (
     if (deviceId is null || deviceName is null || request.BatteryLevel is < 0 or > 100)
         return Results.BadRequest(new { error = "deviceId, deviceName and a batteryLevel from 0 to 100 are required." });
 
-    var now = DateTime.UtcNow;
     var device = await ApplyDeviceHeartbeatAsync(
         request,
         deviceId,
@@ -181,7 +189,62 @@ app.MapPost("/api/devices/heartbeat", async (
         cancellationToken);
 
     await db.SaveChangesAsync(cancellationToken);
-    return Results.Ok(ToDeviceResponse(device, now));
+    return Results.Ok(new
+    {
+        device.LiveRequested,
+        batteryHistoryRequest = batteryHistory.GetPendingRequest(deviceId)
+    });
+});
+
+app.MapGet("/api/devices/{deviceId}/battery-history", async (
+    string deviceId,
+    int? hours,
+    DashcamDbContext db,
+    DeviceWebSocketHub sockets,
+    BatteryHistoryBroker batteryHistory,
+    CancellationToken cancellationToken) =>
+{
+    if (!await db.DeviceStatuses.AnyAsync(device => device.DeviceId == deviceId, cancellationToken))
+        return Results.NotFound(new { error = "Device not found." });
+    var requestedHours = (hours ?? 24) is 6 or 24 or 72 ? hours ?? 24 : 24;
+    try
+    {
+        var response = await batteryHistory.RequestAsync(
+            deviceId,
+            requestedHours,
+            async (requestId, requestedRange, token) =>
+            {
+                await sockets.SendBatteryHistoryRequestAsync(deviceId, requestId, requestedRange, token);
+            },
+            cancellationToken);
+        return Results.Ok(new
+        {
+            deviceId,
+            hours = requestedHours,
+            response.GeneratedAt,
+            items = response.Items
+                .Where(item => item.RecordedAt > 0 && item.TemperatureTenthsC is >= -500 and <= 1000)
+                .TakeLast(1_000)
+        });
+    }
+    catch (TimeoutException)
+    {
+        return Results.Json(
+            new { error = "The phone did not answer. Keep the app running or enable Live Access and try again." },
+            statusCode: StatusCodes.Status504GatewayTimeout);
+    }
+});
+
+app.MapPost("/api/devices/{deviceId}/battery-history-response", (
+    string deviceId,
+    BatteryHistoryResponse response,
+    BatteryHistoryBroker batteryHistory) =>
+{
+    if (response.Items.Count > 1_000)
+        return Results.BadRequest(new { error = "Too many samples." });
+    return batteryHistory.TryComplete(deviceId, response)
+        ? Results.Ok(new { accepted = true })
+        : Results.NotFound(new { error = "The battery history request has expired." });
 });
 
 app.MapGet("/api/devices", async (
@@ -1376,6 +1439,29 @@ static DeviceHeartbeatRequest? ParseSocketHeartbeat(string message)
         {
             PropertyNameCaseInsensitive = true
         });
+    }
+    catch (JsonException)
+    {
+        return null;
+    }
+}
+
+static BatteryHistoryResponse? ParseBatteryHistoryResponse(string message)
+{
+    try
+    {
+        using var document = JsonDocument.Parse(message);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("type", out var type) ||
+            type.GetString() != "battery_history_response")
+            return null;
+        var response = JsonSerializer.Deserialize<BatteryHistoryResponse>(message, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+        return response is { RequestId.Length: > 0 } && response.Items.Count <= 1_000
+            ? response
+            : null;
     }
     catch (JsonException)
     {
