@@ -555,10 +555,10 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(4), 0, dp(12))
         })
         val rangeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf(6, 24, 72).forEach { range ->
+        listOf(8, 24, 72).forEach { range ->
             rangeRow.addView(actionButton(if (range == 72) "3 days" else "$range hours") {
                 showBatteryTemperatureHistory(range)
-            }, weighted().apply { if (range != 6) marginStart = dp(6) })
+            }, weighted().apply { if (range != 8) marginStart = dp(6) })
         }
         root.addView(rangeRow, LinearLayout.LayoutParams(-1, dp(46)))
         val summary = TextView(this).apply {
