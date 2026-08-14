@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import com.example.dashcam.BuildConfig
+import com.example.dashcam.battery.BatteryHistoryPayload
 import com.example.dashcam.live.LiveAccessSettings
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.upload.UploadWorker
@@ -22,6 +23,7 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.Collections
 
 object DeviceStatusReporter {
     private const val TAG = "DeviceStatusReporter"
@@ -30,6 +32,7 @@ object DeviceStatusReporter {
     private val serverReachable = AtomicReference<Boolean?>(null)
     private val webSocketStatusSender = AtomicReference<((DeviceHeartbeat) -> Boolean)?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val historyResponsesInFlight = Collections.synchronizedSet(mutableSetOf<String>())
 
     fun start(context: Context) {
         if (!started.compareAndSet(false, true)) return
@@ -60,8 +63,12 @@ object DeviceStatusReporter {
             val serverUrl = appContext.getSharedPreferences(UploadWorker.PREFS, Context.MODE_PRIVATE)
                 .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
                 ?: UploadWorker.DEFAULT_SERVER_URL
-            ServerClient(serverUrl).reportDeviceStatus(status).also {
+            val client = ServerClient(serverUrl)
+            client.reportDeviceStatus(status).also {
                 updateServerReachability(appContext, true)
+                it.batteryHistoryRequest?.let { request ->
+                    respondToBatteryHistoryRequest(appContext, client, request)
+                }
             }
         } catch (error: Exception) {
             updateServerReachability(appContext, false)
@@ -72,6 +79,24 @@ object DeviceStatusReporter {
 
     fun setWebSocketStatusSender(sender: ((DeviceHeartbeat) -> Boolean)?) {
         webSocketStatusSender.set(sender)
+    }
+
+    private fun respondToBatteryHistoryRequest(
+        context: Context,
+        client: ServerClient,
+        request: BatteryHistoryRequest
+    ) {
+        if (!historyResponsesInFlight.add(request.requestId)) return
+        scope.launch {
+            try {
+                val payload = BatteryHistoryPayload.create(context, request.requestId, request.hours)
+                client.sendBatteryHistoryResponse(deviceId(context), payload)
+            } catch (error: Exception) {
+                Log.d(TAG, "Battery history response deferred: ${error.message.orEmpty()}")
+            } finally {
+                historyResponsesInFlight.remove(request.requestId)
+            }
+        }
     }
 
     private fun updateServerReachability(context: Context, reachable: Boolean) {

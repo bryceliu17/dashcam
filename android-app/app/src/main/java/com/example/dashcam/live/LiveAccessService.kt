@@ -32,6 +32,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
 import com.example.dashcam.R
+import com.example.dashcam.battery.BatteryHistoryPayload
 import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.network.toJson
@@ -280,6 +281,17 @@ class LiveAccessService : Service() {
     private fun handleControlMessage(message: JSONObject) {
         when (message.optString("type")) {
             "live_request" -> applyLiveRequest(message.optBoolean("enabled", false))
+            "battery_history_request" -> {
+                val requestId = message.optString("requestId")
+                if (requestId.isNotBlank()) scope.launch {
+                    val response = BatteryHistoryPayload.create(
+                        this@LiveAccessService,
+                        requestId,
+                        message.optInt("hours", 24)
+                    )
+                    controlSocket?.send(response.toString())
+                }
+            }
         }
     }
 
