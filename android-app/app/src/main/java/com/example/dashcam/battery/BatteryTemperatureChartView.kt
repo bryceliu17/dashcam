@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import com.example.dashcam.data.BatteryTemperatureSample
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -22,6 +23,9 @@ class BatteryTemperatureChartView(context: Context) : View(context) {
     private var samples: List<BatteryTemperatureSample> = emptyList()
     private var windowHours = 24
     private var selectedIndex: Int? = null
+    private var touchDownX = 0f
+    private var touchMoved = false
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     init {
         setBackgroundColor(Color.WHITE)
@@ -39,29 +43,47 @@ class BatteryTemperatureChartView(context: Context) : View(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
+                touchDownX = event.x
+                touchMoved = false
+                selectNearestSampleAt(event.x)
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (kotlin.math.abs(event.x - touchDownX) >= touchSlop) touchMoved = true
+                selectNearestSampleAt(event.x)
                 return true
             }
             MotionEvent.ACTION_UP -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
-                if (samples.isNotEmpty()) {
-                    val density = resources.displayMetrics.density
-                    val left = 48f * density
-                    val right = width - 12f * density
-                    val fraction = ((event.x - left) / (right - left)).coerceIn(0f, 1f)
-                    val endTime = System.currentTimeMillis()
-                    val startTime = endTime - windowHours * 60L * 60_000L
-                    val selectedTime = startTime + ((endTime - startTime) * fraction).toLong()
-                    selectedIndex = samples.indices.minByOrNull { index ->
-                        kotlin.math.abs(samples[index].recordedAt - selectedTime)
-                    }
-                    invalidate()
-                }
-                performClick()
+                selectNearestSampleAt(event.x)
+                if (!touchMoved) performClick()
                 return true
             }
-            MotionEvent.ACTION_CANCEL -> parent?.requestDisallowInterceptTouchEvent(false)
+            MotionEvent.ACTION_CANCEL -> {
+                parent?.requestDisallowInterceptTouchEvent(false)
+                return true
+            }
         }
         return super.onTouchEvent(event)
+    }
+
+    private fun selectNearestSampleAt(touchX: Float) {
+        if (samples.isEmpty()) return
+        val density = resources.displayMetrics.density
+        val left = 48f * density
+        val right = width - 12f * density
+        if (right <= left) return
+        val fraction = ((touchX - left) / (right - left)).coerceIn(0f, 1f)
+        val endTime = System.currentTimeMillis()
+        val startTime = endTime - windowHours * 60L * 60_000L
+        val selectedTime = startTime + ((endTime - startTime) * fraction).toLong()
+        val nearestIndex = samples.indices.minByOrNull { index ->
+            kotlin.math.abs(samples[index].recordedAt - selectedTime)
+        }
+        if (nearestIndex != selectedIndex) {
+            selectedIndex = nearestIndex
+            invalidate()
+        }
     }
 
     override fun performClick(): Boolean {

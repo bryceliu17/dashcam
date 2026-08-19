@@ -1348,6 +1348,7 @@ function MigrationPanel({ migration, busy, folder, upload, onFolderSelected, onU
 
 function BatteryTemperatureChart({ items = [], hours }) {
   const [selectedIndex, setSelectedIndex] = useState(null)
+  const activePointer = useRef(null)
   const width = 800
   const height = 310
   const margin = { left: 54, right: 18, top: 18, bottom: 38 }
@@ -1378,8 +1379,31 @@ function BatteryTemperatureChart({ items = [], hours }) {
     setSelectedIndex(nearestIndex)
   }
 
+  const beginPointSelection = event => {
+    activePointer.current = event.pointerId
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* Pointer capture is optional. */ }
+    selectNearestPoint(event)
+  }
+
+  const continuePointSelection = event => {
+    if (activePointer.current === event.pointerId) selectNearestPoint(event)
+  }
+
+  const endPointSelection = event => {
+    if (activePointer.current !== event.pointerId) return
+    selectNearestPoint(event)
+    activePointer.current = null
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch { /* Pointer capture may already have been released. */ }
+  }
+
+  const cancelPointSelection = event => {
+    if (activePointer.current === event.pointerId) activePointer.current = null
+  }
+
   return <div className="battery-chart-wrap">
-    <svg className="battery-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Battery temperature over ${hours} hours`} onPointerDown={selectNearestPoint}>
+    <svg className="battery-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Battery temperature over ${hours} hours`} onPointerDown={beginPointSelection} onPointerMove={continuePointSelection} onPointerUp={endPointSelection} onPointerCancel={cancelPointSelection}>
       {[0, 1, 2, 3, 4].map(step => {
         const temperature = minimum + (maximum - minimum) * step / 4
         return <g key={step}><line x1={margin.left} x2={width - margin.right} y1={y(temperature)} y2={y(temperature)} className="chart-grid" /><text x={margin.left - 10} y={y(temperature) + 4} textAnchor="end">{temperature.toFixed(0)}°</text></g>
@@ -1416,7 +1440,7 @@ function BatteryHistoryModal({ state, onRange, onClose }) {
       {state.loading ? <div className="battery-history-loading"><div className="spinner" /><span>Requesting local history from the phone…</span><small>With HTTP fallback this can take up to one minute.</small></div> : state.error ? <div className="battery-history-error">{state.error}</div> : <>
         <div className="battery-summary"><span>Current<strong>{value(current)}</strong></span><span>Minimum<strong>{value(minimum)}</strong></span><span>Maximum<strong>{value(maximum)}</strong></span><span>Average<strong>{value(average)}</strong></span></div>
         <BatteryTemperatureChart items={state.items} hours={state.hours} />
-        <p className="battery-history-note">{state.items.length} local samples. Orange: 40°C, red: 45°C. The server does not retain this history.</p>
+        <p className="battery-history-note">{state.items.length} local samples. Tap or drag left/right across the chart to inspect a time. Orange: 40°C, red: 45°C. The server does not retain this history.</p>
       </>}
     </div>
   </div></div>

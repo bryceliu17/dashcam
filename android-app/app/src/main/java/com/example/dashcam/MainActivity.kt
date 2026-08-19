@@ -554,7 +554,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(17, 24, 39))
         })
         root.addView(TextView(this).apply {
-            text = "Measured every 5 minutes and kept on this phone for 3 days."
+            text = "Kept on this phone for 3 days. Tap or drag left/right across the chart to inspect a time."
             textSize = 13f
             setTextColor(Color.rgb(75, 85, 99))
             setPadding(0, dp(4), 0, dp(12))
