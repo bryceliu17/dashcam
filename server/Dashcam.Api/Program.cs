@@ -48,10 +48,13 @@ var audioCleanupGate = new SemaphoreSlim(1, 1);
 var sessionExportGate = new SemaphoreSlim(1, 1);
 var transcriptionGate = new SemaphoreSlim(1, 1);
 var videoExportJobs = new ConcurrentDictionary<Guid, VideoExportJob>();
+var audioExportJobs = new ConcurrentDictionary<Guid, AudioExportJob>();
 
 app.Lifetime.ApplicationStopping.Register(() =>
 {
     foreach (var job in videoExportJobs.Values)
+        if (job.ExportPath is not null) TryDelete(job.ExportPath);
+    foreach (var job in audioExportJobs.Values)
         if (job.ExportPath is not null) TryDelete(job.ExportPath);
 });
 
@@ -855,6 +858,130 @@ app.MapDelete("/api/audio/bulk", async (
     });
 });
 
+app.MapPost("/api/audio-exports", async (
+    AudioExportRequest request,
+    DashcamDbContext db,
+    CancellationToken token) =>
+{
+    CleanupAudioExportJobs(audioExportJobs);
+    var requestedIds = request.Ids?.ToArray() ?? Array.Empty<int>();
+    if (requestedIds.Length is < 1 or > 200 || requestedIds.Any(id => id <= 0))
+        return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive audio IDs." });
+    if (requestedIds.Distinct().Count() != requestedIds.Length)
+        return Results.BadRequest(new { error = "ids must not contain duplicate audio IDs." });
+
+    var recordings = await db.AudioRecordings.AsNoTracking()
+        .Where(recording => requestedIds.Contains(recording.Id))
+        .OrderBy(recording => recording.StartTime)
+        .ToListAsync(token);
+    if (recordings.Count != requestedIds.Length)
+        return Results.BadRequest(new { error = "One or more selected audio recordings no longer exist." });
+    if (recordings.Any(recording => !File.Exists(recording.FilePath)))
+        return Results.NotFound(new { error = "One or more selected audio files are missing." });
+    if (recordings.Zip(recordings.Skip(1), (older, newer) => AudioGapSeconds(newer, older)).Any(gap => gap > 5))
+        return Results.BadRequest(new { error = "The selected audio recordings do not form one continuous session." });
+
+    var first = AsUtc(recordings[0].StartTime);
+    var last = AsUtc(recordings[^1].EndTime);
+    var filename = recordings.Count == 1
+        ? Path.ChangeExtension(recordings[0].OriginalFilename, ".m4a")
+        : $"dashcam_audio_session_{first:yyyyMMdd_HHmmss}_{last:HHmmss}.m4a";
+    var jobId = Guid.NewGuid();
+    var job = new AudioExportJob(
+        jobId,
+        "queued",
+        null,
+        filename,
+        null,
+        DateTime.UtcNow,
+        null);
+    audioExportJobs[jobId] = job;
+
+    _ = Task.Run(async () =>
+    {
+        await sessionExportGate.WaitAsync();
+        audioExportJobs.AddOrUpdate(
+            jobId,
+            job with { Status = "processing" },
+            (_, current) => current with { Status = "processing" });
+        try
+        {
+            var exportPath = await CreateAudioSessionDownloadAsync(recordings, CancellationToken.None);
+            audioExportJobs.AddOrUpdate(
+                jobId,
+                job with { Status = "ready", ExportPath = exportPath, CompletedAtUtc = DateTime.UtcNow },
+                (_, current) => current with
+                {
+                    Status = "ready",
+                    ExportPath = exportPath,
+                    CompletedAtUtc = DateTime.UtcNow
+                });
+        }
+        catch (Exception exception)
+        {
+            app.Logger.LogError(exception, "Audio export job {AudioExportJobId} failed", jobId);
+            audioExportJobs.AddOrUpdate(
+                jobId,
+                job with { Status = "failed", Error = "Audio export failed.", CompletedAtUtc = DateTime.UtcNow },
+                (_, current) => current with
+                {
+                    Status = "failed",
+                    Error = "Audio export failed.",
+                    CompletedAtUtc = DateTime.UtcNow
+                });
+        }
+        finally
+        {
+            sessionExportGate.Release();
+        }
+    });
+
+    return Results.Accepted($"/api/audio-exports/{jobId}", ToAudioExportJobResponse(job));
+});
+
+app.MapGet("/api/audio-exports/{jobId:guid}", (Guid jobId) =>
+{
+    CleanupAudioExportJobs(audioExportJobs);
+    return audioExportJobs.TryGetValue(jobId, out var job)
+        ? Results.Ok(ToAudioExportJobResponse(job))
+        : Results.NotFound(new { error = "Audio export no longer exists." });
+});
+
+app.MapGet("/api/audio-exports/{jobId:guid}/download", (
+    Guid jobId,
+    HttpContext context) =>
+{
+    if (!audioExportJobs.TryRemove(jobId, out var job))
+        return Results.NotFound(new { error = "Audio export no longer exists." });
+    if (job.Status != "ready" || job.ExportPath is null)
+    {
+        audioExportJobs.TryAdd(jobId, job);
+        return Results.Conflict(new { error = "Audio export is not ready yet." });
+    }
+    if (!File.Exists(job.ExportPath))
+        return Results.NotFound(new { error = "The generated audio file is missing." });
+
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers.Expires = "0";
+    try
+    {
+        var stream = new FileStream(
+            job.ExportPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+        return Results.Stream(stream, "audio/mp4", job.Filename, enableRangeProcessing: true);
+    }
+    catch
+    {
+        TryDelete(job.ExportPath);
+        throw;
+    }
+});
+
 app.MapPost("/api/video-exports", async (
     VideoExportRequest request,
     DashcamDbContext db,
@@ -1552,6 +1679,9 @@ static int NormalizeRotation(int degrees)
 static double VideoGapSeconds(Video newer, Video older) =>
     Math.Max(0, (newer.StartTime - older.EndTime).TotalSeconds);
 
+static double AudioGapSeconds(AudioRecording newer, AudioRecording older) =>
+    Math.Max(0, (newer.StartTime - older.EndTime).TotalSeconds);
+
 static object ToVideoExportJobResponse(VideoExportJob job) => new
 {
     jobId = job.Id,
@@ -1559,6 +1689,15 @@ static object ToVideoExportJobResponse(VideoExportJob job) => new
     error = job.Error,
     filename = job.Filename,
     downloadUrl = job.Status == "ready" ? $"/api/video-exports/{job.Id}/download" : null
+};
+
+static object ToAudioExportJobResponse(AudioExportJob job) => new
+{
+    jobId = job.Id,
+    status = job.Status,
+    error = job.Error,
+    filename = job.Filename,
+    downloadUrl = job.Status == "ready" ? $"/api/audio-exports/{job.Id}/download" : null
 };
 
 static void CleanupVideoExportJobs(ConcurrentDictionary<Guid, VideoExportJob> jobs)
@@ -1574,6 +1713,80 @@ static void CleanupVideoExportJobs(ConcurrentDictionary<Guid, VideoExportJob> jo
             continue;
         }
         if (removed.ExportPath is not null) TryDelete(removed.ExportPath);
+    }
+}
+
+static void CleanupAudioExportJobs(ConcurrentDictionary<Guid, AudioExportJob> jobs)
+{
+    var cutoff = DateTime.UtcNow.AddMinutes(-30);
+    foreach (var pair in jobs)
+    {
+        var job = pair.Value;
+        if (job.Status is not ("ready" or "failed") ||
+            (job.CompletedAtUtc ?? job.CreatedAtUtc) >= cutoff ||
+            !jobs.TryRemove(pair.Key, out var removed))
+        {
+            continue;
+        }
+        if (removed.ExportPath is not null) TryDelete(removed.ExportPath);
+    }
+}
+
+static async Task<string> CreateAudioSessionDownloadAsync(
+    IReadOnlyList<AudioRecording> recordings,
+    CancellationToken token)
+{
+    var temporaryDirectory = Path.Combine(
+        Path.GetDirectoryName(recordings[0].FilePath) ?? Path.GetTempPath(),
+        ".session-download-temp");
+    Directory.CreateDirectory(temporaryDirectory);
+    var temporaryPath = Path.Combine(temporaryDirectory, $"audio-session-{Guid.NewGuid():N}.m4a");
+    var arguments = new List<string> { "-v", "error", "-y" };
+    foreach (var recording in recordings)
+    {
+        arguments.Add("-i");
+        arguments.Add(recording.FilePath);
+    }
+
+    var filters = new List<string>();
+    var concatInputs = new List<string>();
+    var segmentCount = 0;
+    for (var index = 0; index < recordings.Count; index++)
+    {
+        filters.Add(
+            $"[{index}:a:0]asetpts=PTS-STARTPTS," +
+            $"aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{index}]");
+        concatInputs.Add($"[a{index}]");
+        segmentCount++;
+
+        if (index >= recordings.Count - 1) continue;
+        var gapSeconds = AudioGapSeconds(recordings[index + 1], recordings[index]);
+        if (gapSeconds <= 0) continue;
+        var gapDuration = FormatFfmpegSeconds(gapSeconds);
+        filters.Add($"anullsrc=channel_layout=stereo:sample_rate=44100:d={gapDuration}[gap{index}]");
+        concatInputs.Add($"[gap{index}]");
+        segmentCount++;
+    }
+    filters.Add($"{string.Concat(concatInputs)}concat=n={segmentCount}:v=0:a=1[outa]");
+    arguments.AddRange(new[]
+    {
+        "-filter_complex", string.Join(';', filters),
+        "-map", "[outa]",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", temporaryPath
+    });
+
+    try
+    {
+        await RunMediaToolAsync("ffmpeg", arguments, token);
+        if (!File.Exists(temporaryPath) || new FileInfo(temporaryPath).Length == 0)
+            throw new InvalidOperationException("Session export did not produce an audio file.");
+        return temporaryPath;
+    }
+    catch
+    {
+        TryDelete(temporaryPath);
+        throw;
     }
 }
 
@@ -2406,7 +2619,16 @@ public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
 public sealed record VideoExportRequest(int[] Ids, bool WithTimestamp, int TimezoneOffsetMinutes);
+public sealed record AudioExportRequest(int[] Ids);
 public sealed record VideoExportJob(
+    Guid Id,
+    string Status,
+    string? ExportPath,
+    string Filename,
+    string? Error,
+    DateTime CreatedAtUtc,
+    DateTime? CompletedAtUtc);
+public sealed record AudioExportJob(
     Guid Id,
     string Status,
     string? ExportPath,

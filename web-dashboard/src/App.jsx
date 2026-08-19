@@ -1511,6 +1511,7 @@ export default function App() {
   const [bulkRotation, setBulkRotation] = useState(90)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [videoExport, setVideoExport] = useState(null)
+  const [audioExport, setAudioExport] = useState(null)
   const [migrationBusy, setMigrationBusy] = useState(false)
   const migrationUploadAbort = useRef(null)
   const rotationRequests = useRef(new Set())
@@ -1567,6 +1568,43 @@ export default function App() {
     } catch (err) {
       videoExportActive.current = false
       setVideoExport(null)
+      setError(err.message)
+    }
+  }
+
+  const startAudioExport = async ({ key, ids }) => {
+    if (audioExportActive.current) return
+    audioExportActive.current = true
+    setError('')
+    setAudioExport({ key, status: 'queued', filename: '' })
+    try {
+      let job = await api('/api/audio-exports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      })
+      while (job.status === 'queued' || job.status === 'processing') {
+        setAudioExport({ key, status: job.status, filename: job.filename || '' })
+        await new Promise(resolve => window.setTimeout(resolve, 1_000))
+        job = await api(`/api/audio-exports/${encodeURIComponent(job.jobId)}`)
+      }
+      if (job.status !== 'ready' || !job.downloadUrl)
+        throw new Error(job.error || 'Audio export failed.')
+
+      setAudioExport({ key, status: 'starting', filename: job.filename || '' })
+      const link = document.createElement('a')
+      link.href = `${API}${job.downloadUrl}`
+      link.download = job.filename || ''
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => {
+        audioExportActive.current = false
+        setAudioExport(null)
+      }, 2_000)
+    } catch (err) {
+      audioExportActive.current = false
+      setAudioExport(null)
       setError(err.message)
     }
   }
@@ -1716,6 +1754,7 @@ export default function App() {
   const audioSessions = useMemo(() => {
     const starts = new Map()
     const ends = new Map()
+    const sessions = []
     let sessionNumber = 1
     let sessionStartIndex = 0
     let sessionDurationSeconds = 0
@@ -1732,6 +1771,7 @@ export default function App() {
           durationSeconds: Math.round(sessionDurationSeconds + gapDurationSeconds),
           recordings: sessionRecordings,
         }
+        sessions.push(session)
         starts.set(sessionStartIndex, session)
         ends.set(index, session)
         sessionNumber += 1
@@ -1739,8 +1779,14 @@ export default function App() {
         sessionDurationSeconds = 0
       }
     })
-    return { starts, ends }
+    return { starts, ends, sessions }
   }, [audio])
+  const selectedAudioDownloadSession = useMemo(() => {
+    if (selectedAudioIds.size === 0) return null
+    return audioSessions.sessions.find(session =>
+      session.recordings.length === selectedAudioIds.size &&
+      session.recordings.every(recording => selectedAudioIds.has(recording.id))) || null
+  }, [audioSessions, selectedAudioIds])
   const liveDevice = devices.find(device => device.deviceId === liveDeviceId)
 
   const startLive = async (device) => {
@@ -2076,6 +2122,7 @@ export default function App() {
   const rangeEnd = Math.min(currentPage * pageSize, currentTotal)
   const selectedSessionRotating = selectedVideoSession?.videos.some(video => rotatingVideoIds.has(video.id)) || false
   const videoExportBusy = videoExport !== null
+  const audioExportBusy = audioExport !== null
 
   const changeDate = (value) => {
     setVideoPage(1)
@@ -2119,6 +2166,15 @@ export default function App() {
             : videoExport.status === 'processing'
               ? 'Rotation, timestamps, and session gaps are being rendered. Large videos can take a few minutes.'
               : `${videoExport.filename || 'Your video'} is ready.`}</small></div>
+      </div>}
+      {audioExport && <div className="download-preparing" role="status" aria-live="polite">
+        {audioExport.status !== 'starting' && <div className="spinner" />}
+        <div><strong>{audioExport.status === 'queued' ? 'Download queued' : audioExport.status === 'processing' ? 'Generating audio…' : 'Download starting'}</strong>
+          <small>{audioExport.status === 'queued'
+            ? 'Waiting for the export worker. Please keep this page open.'
+            : audioExport.status === 'processing'
+              ? 'Session recordings and short silent intervals are being combined.'
+              : `${audioExport.filename || 'Your audio session'} is ready.`}</small></div>
       </div>}
 
       <MigrationPanel migration={migration} busy={migrationBusy} folder={migrationFolder} upload={migrationUpload}
@@ -2205,6 +2261,15 @@ export default function App() {
             </select>
             <button onClick={bulkRotate} disabled={bulkBusy}><Icon name="rotate" />Set rotation</button>
           </>}
+          {archiveType === 'audio' && selectedAudioDownloadSession && <button
+            className="session-download"
+            disabled={bulkBusy || audioExportBusy}
+            onClick={() => startAudioExport({
+              key: 'audio-session-download',
+              ids: selectedAudioDownloadSession.recordings.map(recording => recording.id),
+            })}
+            title="Download this session as one audio file"
+          ><Icon name="download" />{audioExport?.key === 'audio-session-download' ? 'Preparing…' : 'Download session'}</button>}
           <button onClick={() => bulkLock(archiveType, true)} disabled={bulkBusy}><Icon name="lock" />Lock</button>
           <button onClick={() => bulkLock(archiveType, false)} disabled={bulkBusy}><Icon name="unlock" />Unlock</button>
           <button className="danger" onClick={() => bulkRemove(archiveType)} disabled={bulkBusy}><Icon name="trash" />Delete</button>
