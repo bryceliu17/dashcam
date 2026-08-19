@@ -1489,6 +1489,16 @@ class MainActivity : ComponentActivity() {
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, true)
                 PowerMonitorService.start(this)
             }
+            RecordingMode.PowerAutoAlert -> {
+                PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
+                PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
+                PowerRecordingSettings.setPowerAutoBackgroundEnabled(
+                    this,
+                    enabled = true,
+                    startAlertEnabled = true
+                )
+                PowerMonitorService.start(this)
+            }
             RecordingMode.VolumeVideoDoublePress -> {
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
                 PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
@@ -1535,6 +1545,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun currentRecordingMode(): RecordingMode = when {
+        PowerRecordingSettings.isPowerAutoStartAlertEnabled(this) -> RecordingMode.PowerAutoAlert
         PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) -> RecordingMode.PowerAuto
         PowerRecordingSettings.isVolumeKeyStartEnabled(this) -> RecordingMode.VolumeVideoDoublePress
         PowerRecordingSettings.isVolumeKeyAudioStartEnabled(this) -> RecordingMode.VolumeAudioDoublePress
@@ -2227,6 +2238,7 @@ class MainActivity : ComponentActivity() {
     private enum class RecordingMode(val label: String) {
         Frontend("Frontend Recording"),
         PowerAuto("Power Auto Background"),
+        PowerAutoAlert("Power Auto + Start Alert"),
         VolumeVideoDoublePress("Volume Up Double-Press Video"),
         VolumeAudioDoublePress("Volume Up Double-Press Audio")
     }

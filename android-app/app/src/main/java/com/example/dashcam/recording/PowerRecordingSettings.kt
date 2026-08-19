@@ -8,6 +8,7 @@ import android.content.IntentFilter
 object PowerRecordingSettings {
     private const val PREFS = "dashcam_settings"
     private const val KEY_POWER_AUTO_BACKGROUND = "power_auto_background"
+    private const val KEY_POWER_AUTO_START_ALERT = "power_auto_start_alert"
     private const val KEY_POWER_AUTO_START_SUPPRESSED = "power_auto_start_suppressed"
     private const val KEY_LAST_KNOWN_CHARGING = "last_known_charging"
     private const val KEY_VOLUME_KEY_START = "volume_key_start"
@@ -20,9 +21,14 @@ object PowerRecordingSettings {
     fun isPowerAutoBackgroundEnabled(context: Context): Boolean =
         prefs(context).getBoolean(KEY_POWER_AUTO_BACKGROUND, false)
 
-    fun setPowerAutoBackgroundEnabled(context: Context, enabled: Boolean) {
+    fun setPowerAutoBackgroundEnabled(
+        context: Context,
+        enabled: Boolean,
+        startAlertEnabled: Boolean = false
+    ) {
         prefs(context).edit().apply {
             putBoolean(KEY_POWER_AUTO_BACKGROUND, enabled)
+            putBoolean(KEY_POWER_AUTO_START_ALERT, enabled && startAlertEnabled)
             putBoolean(KEY_POWER_AUTO_START_SUPPRESSED, false)
             if (enabled) {
                 putBoolean(KEY_VOLUME_KEY_START, false)
@@ -30,6 +36,10 @@ object PowerRecordingSettings {
             }
         }.apply()
     }
+
+    fun isPowerAutoStartAlertEnabled(context: Context): Boolean =
+        isPowerAutoBackgroundEnabled(context) &&
+            prefs(context).getBoolean(KEY_POWER_AUTO_START_ALERT, false)
 
     fun isVolumeKeyStartEnabled(context: Context): Boolean =
         prefs(context).getBoolean(KEY_VOLUME_KEY_START, false)
