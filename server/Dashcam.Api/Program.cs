@@ -36,6 +36,7 @@ app.UseWebSockets(new WebSocketOptions
 app.UseCors();
 var videoCleanupGate = new SemaphoreSlim(1, 1);
 var audioCleanupGate = new SemaphoreSlim(1, 1);
+var sessionExportGate = new SemaphoreSlim(1, 1);
 
 app.Use(async (context, next) =>
 {
@@ -772,6 +773,64 @@ app.MapDelete("/api/audio/bulk", async (
     });
 });
 
+app.MapGet("/api/videos/session/download", async (
+    string ids, HttpContext context, DashcamDbContext db, CancellationToken token) =>
+{
+    var idValues = ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    if (idValues.Length == 0 || idValues.Length > 200 ||
+        idValues.Any(value => !int.TryParse(value, out var id) || id <= 0))
+        return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive video IDs." });
+    var requestedIds = idValues.Select(int.Parse).Distinct().ToArray();
+    if (requestedIds.Length != idValues.Length)
+        return Results.BadRequest(new { error = "ids must not contain duplicate video IDs." });
+
+    var videos = await db.Videos.AsNoTracking()
+        .Where(video => requestedIds.Contains(video.Id))
+        .OrderBy(video => video.StartTime)
+        .ToListAsync(token);
+    if (videos.Count != requestedIds.Length)
+        return Results.BadRequest(new { error = "One or more selected videos no longer exist." });
+    if (videos.Any(video => !File.Exists(video.FilePath)))
+        return Results.NotFound(new { error = "One or more selected video files are missing." });
+    if (videos.Zip(videos.Skip(1), (older, newer) => VideoGapSeconds(newer, older)).Any(gap => gap > 10))
+        return Results.BadRequest(new { error = "The selected videos do not form one continuous session." });
+
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers.Expires = "0";
+
+    await sessionExportGate.WaitAsync(token);
+    string exportPath;
+    try
+    {
+        exportPath = await CreateVideoSessionDownloadAsync(videos, token);
+    }
+    finally
+    {
+        sessionExportGate.Release();
+    }
+
+    try
+    {
+        var stream = new FileStream(
+            exportPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+        var first = AsUtc(videos[0].StartTime);
+        var last = AsUtc(videos[^1].EndTime);
+        var filename = $"dashcam_session_{first:yyyyMMdd_HHmmss}_{last:HHmmss}.mp4";
+        return Results.Stream(stream, "video/mp4", filename, enableRangeProcessing: true);
+    }
+    catch
+    {
+        TryDelete(exportPath);
+        throw;
+    }
+});
+
 app.MapGet("/api/videos/{id:int}/stream", async (int id, DashcamDbContext db, CancellationToken token) =>
 {
     var video = await db.Videos.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
@@ -1225,6 +1284,125 @@ static int NormalizeRotation(int degrees)
     var normalized = degrees % 360;
     return normalized < 0 ? normalized + 360 : normalized;
 }
+
+static double VideoGapSeconds(Video newer, Video older) =>
+    Math.Max(0, (newer.StartTime - older.EndTime).TotalSeconds);
+
+static async Task<string> CreateVideoSessionDownloadAsync(
+    IReadOnlyList<Video> videos,
+    CancellationToken token)
+{
+    const int outputWidth = 1280;
+    const int outputHeight = 720;
+    const int outputFrameRate = 30;
+    var media = new List<VideoProbeInfo>(videos.Count);
+    foreach (var video in videos)
+        media.Add(await ReadVideoProbeInfoAsync(video.FilePath, video.DurationSeconds, token));
+
+    var temporaryDirectory = Path.Combine(
+        Path.GetDirectoryName(videos[0].FilePath) ?? Path.GetTempPath(),
+        ".session-download-temp");
+    Directory.CreateDirectory(temporaryDirectory);
+    var temporaryPath = Path.Combine(temporaryDirectory, $"session-{Guid.NewGuid():N}.mp4");
+    var arguments = new List<string> { "-v", "error", "-y" };
+    foreach (var video in videos)
+    {
+        arguments.Add("-i");
+        arguments.Add(video.FilePath);
+    }
+
+    var filters = new List<string>();
+    var concatInputs = new List<string>();
+    var segmentCount = 0;
+    for (var index = 0; index < videos.Count; index++)
+    {
+        var duration = FormatFfmpegSeconds(media[index].DurationSeconds);
+        var rotation = videos[index].PlaybackRotationDegrees switch
+        {
+            90 => ",transpose=clock",
+            180 => ",hflip,vflip",
+            270 => ",transpose=cclock",
+            _ => string.Empty
+        };
+        filters.Add(
+            $"[{index}:v:0]trim=duration={duration},setpts=PTS-STARTPTS{rotation}," +
+            $"scale={outputWidth}:{outputHeight}:force_original_aspect_ratio=decrease," +
+            $"pad={outputWidth}:{outputHeight}:(ow-iw)/2:(oh-ih)/2:black," +
+            $"setsar=1,fps={outputFrameRate},format=yuv420p[v{index}]");
+        if (media[index].HasAudio)
+        {
+            filters.Add(
+                $"[{index}:a:0]atrim=duration={duration},asetpts=PTS-STARTPTS," +
+                $"aresample=44100,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{index}]");
+        }
+        else
+        {
+            filters.Add($"anullsrc=channel_layout=stereo:sample_rate=44100:d={duration}[a{index}]");
+        }
+        concatInputs.Add($"[v{index}][a{index}]");
+        segmentCount++;
+
+        if (index >= videos.Count - 1) continue;
+        var gapSeconds = VideoGapSeconds(videos[index + 1], videos[index]);
+        if (gapSeconds <= 0) continue;
+        var gapDuration = FormatFfmpegSeconds(gapSeconds);
+        filters.Add($"color=c=black:s={outputWidth}x{outputHeight}:r={outputFrameRate}:d={gapDuration}[gapv{index}]");
+        filters.Add($"anullsrc=channel_layout=stereo:sample_rate=44100:d={gapDuration}[gapa{index}]");
+        concatInputs.Add($"[gapv{index}][gapa{index}]");
+        segmentCount++;
+    }
+    filters.Add($"{string.Concat(concatInputs)}concat=n={segmentCount}:v=1:a=1[outv][outa]");
+
+    arguments.AddRange(new[]
+    {
+        "-filter_complex", string.Join(';', filters),
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-c:a", "aac", "-b:a", "128k",
+        "-metadata:s:v:0", "rotate=0",
+        "-movflags", "+faststart", temporaryPath
+    });
+
+    try
+    {
+        await RunMediaToolAsync("ffmpeg", arguments, token);
+        if (!File.Exists(temporaryPath) || new FileInfo(temporaryPath).Length == 0)
+            throw new InvalidOperationException("Session export did not produce a video file.");
+        return temporaryPath;
+    }
+    catch
+    {
+        TryDelete(temporaryPath);
+        throw;
+    }
+}
+
+static async Task<VideoProbeInfo> ReadVideoProbeInfoAsync(
+    string filePath,
+    int fallbackDurationSeconds,
+    CancellationToken token)
+{
+    var output = await RunMediaToolAsync("ffprobe", new[]
+    {
+        "-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json", filePath
+    }, token);
+    using var document = JsonDocument.Parse(output);
+    var hasAudio = document.RootElement.TryGetProperty("streams", out var streams) &&
+        streams.EnumerateArray().Any(stream =>
+            stream.TryGetProperty("codec_type", out var type) && type.GetString() == "audio");
+    var duration = Math.Max(0.001, fallbackDurationSeconds);
+    if (document.RootElement.TryGetProperty("format", out var format) &&
+        format.TryGetProperty("duration", out var durationValue) &&
+        double.TryParse(durationValue.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var probedDuration) &&
+        probedDuration > 0)
+    {
+        duration = probedDuration;
+    }
+    return new VideoProbeInfo(duration, hasAudio);
+}
+
+static string FormatFfmpegSeconds(double seconds) =>
+    Math.Max(0.001, seconds).ToString("0.###", CultureInfo.InvariantCulture);
 
 static async Task<string> CreateRotationAwareDownloadAsync(Video video, CancellationToken token)
 {
@@ -1713,6 +1891,7 @@ public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
+public sealed record VideoProbeInfo(double DurationSeconds, bool HasAudio);
 public sealed record VideoCleanupResult(
     int RemovedCount,
     long RemovedBytes,

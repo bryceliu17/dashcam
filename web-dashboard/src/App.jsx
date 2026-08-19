@@ -1611,6 +1611,7 @@ export default function App() {
   const videoSessions = useMemo(() => {
     const starts = new Map()
     const ends = new Map()
+    const sessions = []
     let sessionNumber = 1
     let sessionStartIndex = 0
     let sessionDurationSeconds = 0
@@ -1627,6 +1628,7 @@ export default function App() {
           durationSeconds: Math.round(sessionDurationSeconds + gapDurationSeconds),
           videos: sessionVideos,
         }
+        sessions.push(session)
         starts.set(sessionStartIndex, session)
         ends.set(index, session)
         sessionNumber += 1
@@ -1634,8 +1636,14 @@ export default function App() {
         sessionDurationSeconds = 0
       }
     })
-    return { starts, ends }
+    return { starts, ends, sessions }
   }, [videos])
+  const selectedVideoSession = useMemo(() => {
+    if (selectedVideoIds.size === 0) return null
+    return videoSessions.sessions.find(session =>
+      session.videos.length === selectedVideoIds.size &&
+      session.videos.every(video => selectedVideoIds.has(video.id))) || null
+  }, [videoSessions, selectedVideoIds])
   const audioSessions = useMemo(() => {
     const starts = new Map()
     const ends = new Map()
@@ -1977,6 +1985,10 @@ export default function App() {
   const totalPages = Math.max(1, Math.ceil(currentTotal / pageSize))
   const rangeStart = currentTotal === 0 ? 0 : (currentPage - 1) * pageSize + 1
   const rangeEnd = Math.min(currentPage * pageSize, currentTotal)
+  const selectedSessionRotating = selectedVideoSession?.videos.some(video => rotatingVideoIds.has(video.id)) || false
+  const selectedSessionDownloadUrl = selectedVideoSession
+    ? `${API}/api/videos/session/download?ids=${encodeURIComponent(selectedVideoSession.videos.map(video => video.id).join(','))}&signature=${encodeURIComponent(selectedVideoSession.videos.map(video => `${video.id}-${video.playbackRotationDegrees || 0}`).join('_'))}`
+    : undefined
 
   const changeDate = (value) => {
     setVideoPage(1)
@@ -2072,6 +2084,12 @@ export default function App() {
         {selectedIds.size > 0 && <div className="bulk-toolbar" role="toolbar" aria-label="Bulk actions">
           <strong>{selectedIds.size} selected</strong>
           {archiveType === 'video' && <>
+            {selectedVideoSession && <a
+              className={`session-download ${(bulkBusy || selectedSessionRotating) ? 'disabled' : ''}`}
+              href={(bulkBusy || selectedSessionRotating) ? undefined : selectedSessionDownloadUrl}
+              aria-disabled={bulkBusy || selectedSessionRotating}
+              title={selectedSessionRotating ? 'Waiting for rotation to save…' : 'Download this session as one video'}
+            ><Icon name="download" />Download session</a>}
             <select className="bulk-rotation-select" value={bulkRotation} onChange={event => setBulkRotation(Number(event.target.value))} disabled={bulkBusy} aria-label="Playback rotation">
               <option value={0}>0 deg</option><option value={90}>90 deg</option><option value={180}>180 deg</option><option value={270}>270 deg</option>
             </select>
