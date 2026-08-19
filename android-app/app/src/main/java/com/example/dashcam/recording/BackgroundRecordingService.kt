@@ -58,6 +58,7 @@ class BackgroundRecordingService : Service() {
     private var segmentStartMs = 0L
     private var continueRecording = false
     private var stopAfterCurrentSegmentRequested = false
+    private var startAlertPending = false
 
     private val rotateRunnable = Runnable {
         if (continueRecording) stopSegment(restart = !stopAfterCurrentSegmentRequested)
@@ -102,6 +103,7 @@ class BackgroundRecordingService : Service() {
 
         continueRecording = true
         stopAfterCurrentSegmentRequested = false
+        startAlertPending = PowerRecordingSettings.isPowerAutoStartAlertEnabled(this)
         PowerRecordingSettings.setBackgroundRecordingActive(this, true)
         startForeground(NOTIFICATION_ID, buildNotification("Starting background recording"))
         broadcastState(true, 0, null)
@@ -192,6 +194,7 @@ class BackgroundRecordingService : Service() {
                         it.prepare()
                         it.start()
                     }
+                    showStartAlertOnce()
                     updateNotification("Background recording")
                     mainHandler.removeCallbacks(statusRunnable)
                     mainHandler.post(statusRunnable)
@@ -234,6 +237,7 @@ class BackgroundRecordingService : Service() {
                             captureSession = session
                             session.setRepeatingRequest(request.build(), null, cameraHandler)
                             recorder?.start()
+                            showStartAlertOnce()
                             updateNotification("Background recording")
                             mainHandler.removeCallbacks(statusRunnable)
                             mainHandler.post(statusRunnable)
@@ -250,6 +254,12 @@ class BackgroundRecordingService : Service() {
                 }
             }
         }
+    }
+
+    private fun showStartAlertOnce() {
+        if (!startAlertPending) return
+        startAlertPending = false
+        mainHandler.post { RecordingStartAlert.show(this@BackgroundRecordingService) }
     }
 
     private fun createRecorder(file: File): MediaRecorder {
