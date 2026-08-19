@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Net.Http.Json;
 using Dashcam.Api.Data;
 using Dashcam.Api.Models;
 using Dashcam.Api.Services;
@@ -25,6 +26,12 @@ builder.Services.AddSingleton<BatteryHistoryBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveMigrationService>();
 builder.Services.AddSingleton<MigrationUploadService>();
+builder.Services.AddHttpClient("TranscriptionWorker", client =>
+{
+    var workerUrl = builder.Configuration["TranscriptionWorkerUrl"] ?? "http://transcription:8000";
+    client.BaseAddress = new Uri($"{workerUrl.TrimEnd('/')}/");
+    client.Timeout = TimeSpan.FromHours(2);
+});
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 builder.Services.Configure<FormOptions>(options =>
@@ -39,6 +46,7 @@ app.UseCors();
 var videoCleanupGate = new SemaphoreSlim(1, 1);
 var audioCleanupGate = new SemaphoreSlim(1, 1);
 var sessionExportGate = new SemaphoreSlim(1, 1);
+var transcriptionGate = new SemaphoreSlim(1, 1);
 var videoExportJobs = new ConcurrentDictionary<Guid, VideoExportJob>();
 
 app.Lifetime.ApplicationStopping.Register(() =>
@@ -85,6 +93,8 @@ await using (var scope = app.Services.CreateAsyncScope())
     await EnsurePlaybackRotationColumnAsync(db);
     await EnsureAudioTableAsync(db);
     await EnsureDeviceStatusTableAsync(db);
+    await db.Database.ExecuteSqlRawAsync(
+        "UPDATE AudioRecordings SET TranscriptStatus = 'failed', TranscriptError = 'Transcription was interrupted by a server restart.' WHERE TranscriptStatus IN ('queued', 'processing')");
     await db.Database.ExecuteSqlRawAsync(
         "UPDATE DeviceStatuses SET LiveRequested = 0, LiveStreaming = 0, LiveError = ''");
 }
@@ -713,6 +723,69 @@ app.MapGet("/api/audio/{id:int}/download", async (int id, DashcamDbContext db, C
     if (audio is null) return Results.NotFound();
     if (!File.Exists(audio.FilePath)) return Results.NotFound(new { error = "Audio file is missing." });
     return Results.File(audio.FilePath, "audio/mp4", audio.OriginalFilename, enableRangeProcessing: true);
+});
+
+app.MapPost("/api/audio/{id:int}/transcription", async (
+    int id,
+    DashcamDbContext db,
+    IServiceScopeFactory scopeFactory,
+    IHttpClientFactory httpClientFactory,
+    ILoggerFactory loggerFactory,
+    CancellationToken token) =>
+{
+    var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == id, token);
+    if (audio is null) return Results.NotFound();
+    if (!File.Exists(audio.FilePath)) return Results.NotFound(new { error = "Audio file is missing." });
+    if (audio.DurationSeconds > 30 * 60)
+        return Results.BadRequest(new { error = "Only audio recordings up to 30 minutes can be transcribed." });
+    if (audio.TranscriptStatus is "queued" or "processing")
+        return Results.Conflict(new { error = "This recording is already being transcribed." });
+
+    audio.TranscriptStatus = "queued";
+    audio.TranscriptText = string.Empty;
+    audio.TranscriptLanguage = string.Empty;
+    audio.TranscriptLanguageProbability = 0;
+    audio.TranscriptModel = string.Empty;
+    audio.TranscriptSegmentsJson = string.Empty;
+    audio.TranscriptError = string.Empty;
+    audio.TranscriptCreatedAt = null;
+    await db.SaveChangesAsync(token);
+
+    _ = Task.Run(() => RunAudioTranscriptionAsync(
+        id,
+        scopeFactory,
+        httpClientFactory,
+        loggerFactory,
+        transcriptionGate));
+
+    return Results.Accepted($"/api/audio/{id}/transcription", ToTranscriptResponse(audio, includeText: false));
+});
+
+app.MapGet("/api/audio/{id:int}/transcription", async (
+    int id, DashcamDbContext db, CancellationToken token) =>
+{
+    var audio = await db.AudioRecordings.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
+    return audio is null
+        ? Results.NotFound()
+        : Results.Ok(ToTranscriptResponse(audio, includeText: true));
+});
+
+app.MapGet("/api/audio/{id:int}/transcription/download", async (
+    int id, DashcamDbContext db, CancellationToken token) =>
+{
+    var audio = await db.AudioRecordings.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
+    if (audio is null) return Results.NotFound();
+    if (audio.TranscriptStatus != "ready")
+        return Results.Conflict(new { error = "The transcript is not ready." });
+
+    var text = BuildTranscriptFile(audio);
+    var preamble = Encoding.UTF8.GetPreamble();
+    var content = Encoding.UTF8.GetBytes(text);
+    var bytes = new byte[preamble.Length + content.Length];
+    Buffer.BlockCopy(preamble, 0, bytes, 0, preamble.Length);
+    Buffer.BlockCopy(content, 0, bytes, preamble.Length, content.Length);
+    var filename = $"{CleanFileBase(Path.GetFileNameWithoutExtension(audio.OriginalFilename))}_transcript.txt";
+    return Results.File(bytes, "text/plain; charset=utf-8", filename);
 });
 
 app.MapDelete("/api/audio/{id:int}", async (int id, DashcamDbContext db, CancellationToken token) =>
@@ -1843,6 +1916,14 @@ static async Task EnsureAudioTableAsync(DashcamDbContext db)
         "CREATE INDEX IF NOT EXISTS IX_AudioRecordings_StartTime ON AudioRecordings (StartTime)");
     await db.Database.ExecuteSqlRawAsync(
         "CREATE INDEX IF NOT EXISTS IX_AudioRecordings_Locked ON AudioRecordings (Locked)");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptStatus", "TEXT NOT NULL DEFAULT 'none'");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptText", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptLanguage", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptLanguageProbability", "REAL NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptModel", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptSegmentsJson", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptError", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptCreatedAt", "TEXT NULL");
 }
 
 static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
@@ -1969,6 +2050,136 @@ static void TryDeleteWaveformCaches(string audioPath)
     foreach (var cachePath in Directory.EnumerateFiles(directory, pattern)) TryDelete(cachePath);
 }
 
+static async Task RunAudioTranscriptionAsync(
+    int audioId,
+    IServiceScopeFactory scopeFactory,
+    IHttpClientFactory httpClientFactory,
+    ILoggerFactory loggerFactory,
+    SemaphoreSlim gate)
+{
+    await gate.WaitAsync();
+    try
+    {
+        string audioPath;
+        await using (var scope = scopeFactory.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<DashcamDbContext>();
+            var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == audioId);
+            if (audio is null || audio.TranscriptStatus != "queued") return;
+            if (!File.Exists(audio.FilePath)) throw new FileNotFoundException("Audio file is missing.", audio.FilePath);
+            audio.TranscriptStatus = "processing";
+            audio.TranscriptError = string.Empty;
+            await db.SaveChangesAsync();
+            audioPath = audio.FilePath;
+        }
+
+        var client = httpClientFactory.CreateClient("TranscriptionWorker");
+        using var response = await client.PostAsJsonAsync("transcribe", new { path = audioPath });
+        if (!response.IsSuccessStatusCode)
+        {
+            var workerError = await response.Content.ReadAsStringAsync();
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(workerError)
+                    ? $"Transcription worker returned HTTP {(int)response.StatusCode}."
+                    : workerError);
+        }
+
+        var result = await response.Content.ReadFromJsonAsync<AudioTranscriptionWorkerResponse>()
+            ?? throw new InvalidOperationException("Transcription worker returned an empty response.");
+        await using (var scope = scopeFactory.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<DashcamDbContext>();
+            var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == audioId);
+            if (audio is null) return;
+            audio.TranscriptStatus = "ready";
+            audio.TranscriptText = result.Text?.Trim() ?? string.Empty;
+            audio.TranscriptLanguage = CleanOptionalText(result.Language, 24);
+            audio.TranscriptLanguageProbability = Math.Clamp(result.LanguageProbability, 0, 1);
+            audio.TranscriptModel = CleanOptionalText(result.Model, 80);
+            audio.TranscriptSegmentsJson = JsonSerializer.Serialize(result.Segments ?? []);
+            audio.TranscriptError = string.Empty;
+            audio.TranscriptCreatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+    }
+    catch (Exception error)
+    {
+        loggerFactory.CreateLogger("Dashcam.AudioTranscription").LogError(
+            error,
+            "Audio transcription failed for recording {AudioId}",
+            audioId);
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<DashcamDbContext>();
+            var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == audioId);
+            if (audio is not null)
+            {
+                audio.TranscriptStatus = "failed";
+                audio.TranscriptError = CleanOptionalText(error.Message, 1000);
+                await db.SaveChangesAsync();
+            }
+        }
+        catch (Exception statusError)
+        {
+            loggerFactory.CreateLogger("Dashcam.AudioTranscription").LogError(
+                statusError,
+                "Unable to persist the failed transcription status for recording {AudioId}",
+                audioId);
+        }
+    }
+    finally
+    {
+        gate.Release();
+    }
+}
+
+static object ToTranscriptResponse(AudioRecording audio, bool includeText)
+{
+    IReadOnlyList<AudioTranscriptSegment> segments = [];
+    if (includeText && !string.IsNullOrWhiteSpace(audio.TranscriptSegmentsJson))
+    {
+        try
+        {
+            segments = JsonSerializer.Deserialize<List<AudioTranscriptSegment>>(
+                audio.TranscriptSegmentsJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+        }
+        catch (JsonException)
+        {
+            segments = [];
+        }
+    }
+    return new
+    {
+        audio.Id,
+        status = audio.TranscriptStatus,
+        text = includeText ? audio.TranscriptText : null,
+        language = audio.TranscriptLanguage,
+        languageProbability = audio.TranscriptLanguageProbability,
+        model = audio.TranscriptModel,
+        error = audio.TranscriptError,
+        createdAt = audio.TranscriptCreatedAt.HasValue ? AsUtc(audio.TranscriptCreatedAt.Value) : (DateTime?)null,
+        segments
+    };
+}
+
+static string BuildTranscriptFile(AudioRecording audio)
+{
+    var language = string.IsNullOrWhiteSpace(audio.TranscriptLanguage) ? "Unknown" : audio.TranscriptLanguage;
+    var probability = audio.TranscriptLanguageProbability > 0
+        ? $" ({audio.TranscriptLanguageProbability:P0})"
+        : string.Empty;
+    return $"""
+        Audio: {audio.OriginalFilename}
+        Recorded: {AsUtc(audio.StartTime):yyyy-MM-dd HH:mm:ss} UTC
+        Language: {language}{probability}
+        Model: {audio.TranscriptModel}
+
+        {audio.TranscriptText}
+        """;
+}
+
 static object ToResponse(Video video) => new
 {
     video.Id,
@@ -1994,6 +2205,12 @@ static object ToAudioResponse(AudioRecording audio) => new
     audio.DurationSeconds,
     audio.FileSizeBytes,
     audio.Locked,
+    transcriptStatus = audio.TranscriptStatus,
+    transcriptLanguage = audio.TranscriptLanguage,
+    transcriptLanguageProbability = audio.TranscriptLanguageProbability,
+    transcriptModel = audio.TranscriptModel,
+    transcriptError = audio.TranscriptError,
+    transcriptCreatedAt = audio.TranscriptCreatedAt.HasValue ? AsUtc(audio.TranscriptCreatedAt.Value) : (DateTime?)null,
     UploadedAt = AsUtc(audio.UploadedAt),
     streamUrl = $"/api/audio/{audio.Id}/stream"
 };
@@ -2198,6 +2415,13 @@ public sealed record VideoExportJob(
     DateTime CreatedAtUtc,
     DateTime? CompletedAtUtc);
 public sealed record VideoProbeInfo(double DurationSeconds, bool HasAudio);
+public sealed record AudioTranscriptSegment(double Start, double End, string Text);
+public sealed record AudioTranscriptionWorkerResponse(
+    string? Text,
+    string? Language,
+    double LanguageProbability,
+    string? Model,
+    List<AudioTranscriptSegment>? Segments);
 public sealed record TimestampSegment(
     double OutputStartSeconds,
     double DurationSeconds,

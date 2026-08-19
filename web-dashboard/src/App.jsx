@@ -138,6 +138,7 @@ function Icon({ name }) {
     fullscreen: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></>,
     calendar: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></>,
+    transcript: <><path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/></>,
     close: <path d="M6 6l12 12M18 6 6 18"/>,
     chevronLeft: <path d="m15 18-6-6 6-6"/>,
     chevronRight: <path d="m9 18 6-6-6-6"/>,
@@ -1488,6 +1489,7 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState(null)
   const [selectedAudio, setSelectedAudio] = useState(null)
   const [selectedAudioSession, setSelectedAudioSession] = useState(null)
+  const [selectedTranscript, setSelectedTranscript] = useState(null)
   const [liveDeviceId, setLiveDeviceId] = useState(null)
   const [batteryHistory, setBatteryHistory] = useState(null)
   const [archiveType, setArchiveType] = useState('video')
@@ -1514,6 +1516,19 @@ export default function App() {
   const rotationRequests = useRef(new Set())
   const batteryHistoryRequest = useRef(0)
   const videoExportActive = useRef(false)
+  const audioExportActive = useRef(false)
+
+  const updateTranscriptSummary = useCallback(result => {
+    setAudio(items => items.map(item => item.id === result.id ? {
+      ...item,
+      transcriptStatus: result.status,
+      transcriptLanguage: result.language,
+      transcriptLanguageProbability: result.languageProbability,
+      transcriptModel: result.model,
+      transcriptError: result.error,
+      transcriptCreatedAt: result.createdAt,
+    } : item))
+  }, [])
 
   const startVideoExport = async ({ key, ids, withTimestamp }) => {
     if (videoExportActive.current) return
@@ -1647,6 +1662,16 @@ export default function App() {
     }, 1_000)
     return () => window.clearInterval(interval)
   }, [migration?.phase])
+  useEffect(() => {
+    const pending = audio.filter(recording => ['queued', 'processing'].includes(recording.transcriptStatus))
+    if (!pending.length) return undefined
+    const timer = window.setTimeout(() => {
+      Promise.all(pending.map(recording => api(`/api/audio/${recording.id}/transcription`)
+        .then(updateTranscriptSummary)
+        .catch(() => {})))
+    }, 1_000)
+    return () => window.clearTimeout(timer)
+  }, [audio, updateTranscriptSummary])
 
   const storagePercent = useMemo(() => storage
     ? Math.min(100, storage.totalSizeBytes / storage.maxStorageBytes * 100) : 0, [storage])
@@ -1816,6 +1841,26 @@ export default function App() {
         next.delete(video.id)
         return next
       })
+    }
+  }
+
+  const transcribeAudio = async recording => {
+    if (recording.durationSeconds > 30 * 60 || ['queued', 'processing'].includes(recording.transcriptStatus)) return
+    setError('')
+    try {
+      const result = await api(`/api/audio/${recording.id}/transcription`, { method: 'POST' })
+      updateTranscriptSummary(result)
+    } catch (err) { setError(err.message) }
+  }
+
+  const viewAudioTranscript = async recording => {
+    setSelectedTranscript({ recording, loading: true, error: '', text: '' })
+    try {
+      const result = await api(`/api/audio/${recording.id}/transcription`)
+      updateTranscriptSummary(result)
+      setSelectedTranscript({ recording, loading: false, ...result })
+    } catch (err) {
+      setSelectedTranscript({ recording, loading: false, error: err.message, text: '' })
     }
   }
 
@@ -2219,10 +2264,18 @@ export default function App() {
               <td>{formatDate(recording.startTime)}</td>
               <td className="file"><span>{recording.originalFilename || recording.filename}</span><small>#{recording.id}</small></td>
               <td>{formatDuration(recording.durationSeconds)}</td><td>{formatBytes(recording.fileSizeBytes)}</td>
-              <td><span className={`pill ${recording.locked ? 'locked' : ''}`}>{recording.locked ? 'Locked' : 'Unlocked'}</span></td>
+              <td><div className="recording-status"><span className={`pill ${recording.locked ? 'locked' : ''}`}>{recording.locked ? 'Locked' : 'Unlocked'}</span>
+                {recording.transcriptStatus && recording.transcriptStatus !== 'none' && <span className={`transcript-status ${recording.transcriptStatus}`} title={recording.transcriptError || ''}>{recording.transcriptStatus === 'ready' ? 'Transcript ready' : recording.transcriptStatus === 'failed' ? 'Transcript failed' : recording.transcriptStatus === 'queued' ? 'Transcript queued' : 'Transcribing'}</span>}
+              </div></td>
               <td><div className="actions">
                 <button title="Play" onClick={() => setSelectedAudio(recording)}><Icon name="play" /></button>
                 <a title="Download" href={`${API}/api/audio/${recording.id}/download`}><Icon name="download" /></a>
+                <button
+                  className={['queued', 'processing'].includes(recording.transcriptStatus) ? 'exporting' : ''}
+                  disabled={recording.durationSeconds > 30 * 60 || ['queued', 'processing'].includes(recording.transcriptStatus)}
+                  title={recording.durationSeconds > 30 * 60 ? 'Only recordings up to 30 minutes can be transcribed' : recording.transcriptStatus === 'ready' ? 'View transcript' : recording.transcriptStatus === 'failed' ? `Retry transcription${recording.transcriptError ? `: ${recording.transcriptError}` : ''}` : ['queued', 'processing'].includes(recording.transcriptStatus) ? 'Transcribing…' : 'Transcribe to text'}
+                  onClick={() => recording.transcriptStatus === 'ready' ? viewAudioTranscript(recording) : transcribeAudio(recording)}
+                ><Icon name={['queued', 'processing'].includes(recording.transcriptStatus) ? 'refresh' : 'transcript'} /></button>
                 <button title={recording.locked ? 'Unlock' : 'Lock'} onClick={() => toggleAudioLock(recording)}><Icon name={recording.locked ? 'unlock' : 'lock'} /></button>
                 <button className="danger" title="Delete" onClick={() => removeAudio(recording)}><Icon name="trash" /></button>
               </div></td>
@@ -2265,6 +2318,13 @@ export default function App() {
       <div><strong>Session {selectedAudioSession.number} | {selectedAudioSession.count} {selectedAudioSession.count === 1 ? 'recording' : 'recordings'}</strong><button className="close-player" aria-label="Close audio session player" onClick={() => setSelectedAudioSession(null)}>X</button></div>
       <AudioSessionPlayback key={selectedAudioSession.number} session={selectedAudioSession} />
       <p>{formatDate(selectedAudioSession.recordings[0].startTime)} to {formatDate(selectedAudioSession.recordings.at(-1).endTime)} | {formatTotalDuration(selectedAudioSession.durationSeconds)} including short silent intervals</p>
+    </div></div>}
+    {selectedTranscript && <div className="modal" onMouseDown={() => setSelectedTranscript(null)}><div className="player transcript-modal" onMouseDown={event => event.stopPropagation()}>
+      <div><strong>{selectedTranscript.recording.originalFilename || selectedTranscript.recording.filename}</strong><span className="player-actions">{selectedTranscript.status === 'ready' && <a className="transcript-download" href={`${API}/api/audio/${selectedTranscript.recording.id}/transcription/download`}><Icon name="download" />Download TXT</a>}<button className="close-player" aria-label="Close transcript" onClick={() => setSelectedTranscript(null)}>X</button></span></div>
+      {selectedTranscript.loading ? <div className="transcript-loading"><div className="spinner" /><span>Loading transcript…</span></div> : selectedTranscript.error ? <div className="transcript-error">{selectedTranscript.error}</div> : <div className="transcript-body">
+        <div className="transcript-meta"><span>Language <strong>{selectedTranscript.language || 'Unknown'}{selectedTranscript.languageProbability ? ` · ${Math.round(selectedTranscript.languageProbability * 100)}%` : ''}</strong></span><span>Model <strong>{selectedTranscript.model || '—'}</strong></span></div>
+        <pre>{selectedTranscript.text || 'No speech was detected in this recording.'}</pre>
+      </div>}
     </div></div>}
     {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} />}
     {batteryHistory && <BatteryHistoryModal state={batteryHistory} onRange={hours => loadBatteryHistory(batteryHistory.device, hours)} onClose={closeBatteryHistory} />}

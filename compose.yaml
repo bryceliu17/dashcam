@@ -15,8 +15,27 @@ services:
       ImportStagingPath: /data/import-staging
       MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-280}
       MaxAudioStorageGB: ${DASHCAM_MAX_AUDIO_STORAGE_GB:-20}
+      TranscriptionWorkerUrl: http://transcription:8000
     volumes:
       - "E:/DashcamData:/data"
+    depends_on:
+      - transcription
+
+  transcription:
+    build:
+      context: .
+      dockerfile: transcription-worker/Dockerfile
+    restart: unless-stopped
+    gpus: all
+    environment:
+      AUDIO_ROOT: /data/audio
+      WHISPER_MODEL: turbo
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
+      WHISPER_MODEL_CACHE: /models
+    volumes:
+      - "E:/DashcamData:/data:ro"
+      - transcription-models:/models
 
   web:
     build:
@@ -27,4 +46,7 @@ services:
       - api
     ports:
       - "8080:80"
+
+volumes:
+  transcription-models:
 
