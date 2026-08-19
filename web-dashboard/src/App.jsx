@@ -129,6 +129,7 @@ function Icon({ name }) {
     lock: <><rect x="6" y="10" width="12" height="9" rx="2"/><path d="M9 10V7a3 3 0 0 1 6 0v3"/></>,
     unlock: <><rect x="6" y="10" width="12" height="9" rx="2"/><path d="M9 10V7a3 3 0 0 1 5.4-1.8"/></>,
     download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 20h14"/></>,
+    clock: <><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></>,
     trash: <><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7"/><path d="M10 11v5m4-5v5"/></>,
     refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .7-8.7L20 11"/></>,
     rotate: <><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 1-2-5"/></>,
@@ -1986,8 +1987,12 @@ export default function App() {
   const rangeStart = currentTotal === 0 ? 0 : (currentPage - 1) * pageSize + 1
   const rangeEnd = Math.min(currentPage * pageSize, currentTotal)
   const selectedSessionRotating = selectedVideoSession?.videos.some(video => rotatingVideoIds.has(video.id)) || false
+  const downloadTimezoneOffsetMinutes = new Date().getTimezoneOffset()
   const selectedSessionDownloadUrl = selectedVideoSession
     ? `${API}/api/videos/session/download?ids=${encodeURIComponent(selectedVideoSession.videos.map(video => video.id).join(','))}&signature=${encodeURIComponent(selectedVideoSession.videos.map(video => `${video.id}-${video.playbackRotationDegrees || 0}`).join('_'))}`
+    : undefined
+  const selectedSessionTimedDownloadUrl = selectedSessionDownloadUrl
+    ? `${selectedSessionDownloadUrl}&withTimestamp=true&timezoneOffsetMinutes=${downloadTimezoneOffsetMinutes}`
     : undefined
 
   const changeDate = (value) => {
@@ -2090,6 +2095,12 @@ export default function App() {
               aria-disabled={bulkBusy || selectedSessionRotating}
               title={selectedSessionRotating ? 'Waiting for rotation to save…' : 'Download this session as one video'}
             ><Icon name="download" />Download session</a>}
+            {selectedVideoSession && <a
+              className={`timestamp-download ${(bulkBusy || selectedSessionRotating) ? 'disabled' : ''}`}
+              href={(bulkBusy || selectedSessionRotating) ? undefined : selectedSessionTimedDownloadUrl}
+              aria-disabled={bulkBusy || selectedSessionRotating}
+              title={selectedSessionRotating ? 'Waiting for rotation to save…' : 'Download this session with date and time'}
+            ><Icon name="clock" />Download with time</a>}
             <select className="bulk-rotation-select" value={bulkRotation} onChange={event => setBulkRotation(Number(event.target.value))} disabled={bulkBusy} aria-label="Playback rotation">
               <option value={0}>0 deg</option><option value={90}>90 deg</option><option value={180}>180 deg</option><option value={270}>270 deg</option>
             </select>
@@ -2124,6 +2135,12 @@ export default function App() {
                   aria-disabled={rotatingVideoIds.has(video.id)}
                   href={rotatingVideoIds.has(video.id) ? undefined : `${API}/api/videos/${video.id}/download?rotation=${video.playbackRotationDegrees || 0}`}
                 ><Icon name="download" /></a>
+                <a
+                  className={rotatingVideoIds.has(video.id) ? 'disabled' : ''}
+                  title={rotatingVideoIds.has(video.id) ? 'Saving rotation…' : 'Download with date and time'}
+                  aria-disabled={rotatingVideoIds.has(video.id)}
+                  href={rotatingVideoIds.has(video.id) ? undefined : `${API}/api/videos/${video.id}/download-with-time?timezoneOffsetMinutes=${downloadTimezoneOffsetMinutes}&signature=${video.playbackRotationDegrees || 0}`}
+                ><Icon name="clock" /></a>
                 <button title={video.locked ? 'Unlock' : 'Lock'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
                 <button className="danger" title="Delete" onClick={() => remove(video)}><Icon name="trash" /></button>
               </div></td>

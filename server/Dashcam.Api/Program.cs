@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Dashcam.Api.Data;
 using Dashcam.Api.Models;
@@ -774,7 +775,12 @@ app.MapDelete("/api/audio/bulk", async (
 });
 
 app.MapGet("/api/videos/session/download", async (
-    string ids, HttpContext context, DashcamDbContext db, CancellationToken token) =>
+    string ids,
+    bool? withTimestamp,
+    int? timezoneOffsetMinutes,
+    HttpContext context,
+    DashcamDbContext db,
+    CancellationToken token) =>
 {
     var idValues = ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     if (idValues.Length == 0 || idValues.Length > 200 ||
@@ -803,7 +809,10 @@ app.MapGet("/api/videos/session/download", async (
     string exportPath;
     try
     {
-        exportPath = await CreateVideoSessionDownloadAsync(videos, token);
+        var timestampOffset = withTimestamp == true
+            ? Math.Clamp(timezoneOffsetMinutes ?? 0, -14 * 60, 14 * 60)
+            : (int?)null;
+        exportPath = await CreateVideoSessionDownloadAsync(videos, timestampOffset, token);
     }
     finally
     {
@@ -821,7 +830,53 @@ app.MapGet("/api/videos/session/download", async (
             FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
         var first = AsUtc(videos[0].StartTime);
         var last = AsUtc(videos[^1].EndTime);
-        var filename = $"dashcam_session_{first:yyyyMMdd_HHmmss}_{last:HHmmss}.mp4";
+        var suffix = withTimestamp == true ? "_with_time" : string.Empty;
+        var filename = $"dashcam_session_{first:yyyyMMdd_HHmmss}_{last:HHmmss}{suffix}.mp4";
+        return Results.Stream(stream, "video/mp4", filename, enableRangeProcessing: true);
+    }
+    catch
+    {
+        TryDelete(exportPath);
+        throw;
+    }
+});
+
+app.MapGet("/api/videos/{id:int}/download-with-time", async (
+    int id,
+    int? timezoneOffsetMinutes,
+    HttpContext context,
+    DashcamDbContext db,
+    CancellationToken token) =>
+{
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers.Expires = "0";
+    var video = await db.Videos.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
+    if (video is null) return Results.NotFound();
+    if (!File.Exists(video.FilePath)) return Results.NotFound(new { error = "Video file is missing." });
+
+    await sessionExportGate.WaitAsync(token);
+    string exportPath;
+    try
+    {
+        var timestampOffset = Math.Clamp(timezoneOffsetMinutes ?? 0, -14 * 60, 14 * 60);
+        exportPath = await CreateVideoSessionDownloadAsync(new[] { video }, timestampOffset, token);
+    }
+    finally
+    {
+        sessionExportGate.Release();
+    }
+
+    try
+    {
+        var stream = new FileStream(
+            exportPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+        var filename = $"{Path.GetFileNameWithoutExtension(video.OriginalFilename)}_with_time.mp4";
         return Results.Stream(stream, "video/mp4", filename, enableRangeProcessing: true);
     }
     catch
@@ -1290,10 +1345,12 @@ static double VideoGapSeconds(Video newer, Video older) =>
 
 static async Task<string> CreateVideoSessionDownloadAsync(
     IReadOnlyList<Video> videos,
+    int? timestampTimezoneOffsetMinutes,
     CancellationToken token)
 {
     const int outputWidth = 1280;
     const int outputHeight = 720;
+    const int timestampBarHeight = 80;
     const int outputFrameRate = 30;
     var media = new List<VideoProbeInfo>(videos.Count);
     foreach (var video in videos)
@@ -1304,6 +1361,9 @@ static async Task<string> CreateVideoSessionDownloadAsync(
         ".session-download-temp");
     Directory.CreateDirectory(temporaryDirectory);
     var temporaryPath = Path.Combine(temporaryDirectory, $"session-{Guid.NewGuid():N}.mp4");
+    var subtitlePath = timestampTimezoneOffsetMinutes.HasValue
+        ? Path.Combine(temporaryDirectory, $"session-{Guid.NewGuid():N}.srt")
+        : null;
     var arguments = new List<string> { "-v", "error", "-y" };
     foreach (var video in videos)
     {
@@ -1313,10 +1373,16 @@ static async Task<string> CreateVideoSessionDownloadAsync(
 
     var filters = new List<string>();
     var concatInputs = new List<string>();
+    var timestampSegments = new List<TimestampSegment>();
+    var outputOffsetSeconds = 0d;
     var segmentCount = 0;
     for (var index = 0; index < videos.Count; index++)
     {
         var duration = FormatFfmpegSeconds(media[index].DurationSeconds);
+        var contentHeight = timestampTimezoneOffsetMinutes.HasValue
+            ? outputHeight - timestampBarHeight
+            : outputHeight;
+        var verticalOffset = timestampTimezoneOffsetMinutes.HasValue ? "0" : "(oh-ih)/2";
         var rotation = videos[index].PlaybackRotationDegrees switch
         {
             90 => ",transpose=clock",
@@ -1326,8 +1392,8 @@ static async Task<string> CreateVideoSessionDownloadAsync(
         };
         filters.Add(
             $"[{index}:v:0]trim=duration={duration},setpts=PTS-STARTPTS{rotation}," +
-            $"scale={outputWidth}:{outputHeight}:force_original_aspect_ratio=decrease," +
-            $"pad={outputWidth}:{outputHeight}:(ow-iw)/2:(oh-ih)/2:black," +
+            $"scale={outputWidth}:{contentHeight}:force_original_aspect_ratio=decrease," +
+            $"pad={outputWidth}:{outputHeight}:(ow-iw)/2:{verticalOffset}:black," +
             $"setsar=1,fps={outputFrameRate},format=yuv420p[v{index}]");
         if (media[index].HasAudio)
         {
@@ -1340,6 +1406,11 @@ static async Task<string> CreateVideoSessionDownloadAsync(
             filters.Add($"anullsrc=channel_layout=stereo:sample_rate=44100:d={duration}[a{index}]");
         }
         concatInputs.Add($"[v{index}][a{index}]");
+        timestampSegments.Add(new TimestampSegment(
+            outputOffsetSeconds,
+            media[index].DurationSeconds,
+            AsUtc(videos[index].StartTime)));
+        outputOffsetSeconds += media[index].DurationSeconds;
         segmentCount++;
 
         if (index >= videos.Count - 1) continue;
@@ -1349,9 +1420,28 @@ static async Task<string> CreateVideoSessionDownloadAsync(
         filters.Add($"color=c=black:s={outputWidth}x{outputHeight}:r={outputFrameRate}:d={gapDuration}[gapv{index}]");
         filters.Add($"anullsrc=channel_layout=stereo:sample_rate=44100:d={gapDuration}[gapa{index}]");
         concatInputs.Add($"[gapv{index}][gapa{index}]");
+        timestampSegments.Add(new TimestampSegment(
+            outputOffsetSeconds,
+            gapSeconds,
+            AsUtc(videos[index].EndTime)));
+        outputOffsetSeconds += gapSeconds;
         segmentCount++;
     }
-    filters.Add($"{string.Concat(concatInputs)}concat=n={segmentCount}:v=1:a=1[outv][outa]");
+    var concatVideoOutput = subtitlePath is null ? "[outv]" : "[sessionv]";
+    filters.Add($"{string.Concat(concatInputs)}concat=n={segmentCount}:v=1:a=1{concatVideoOutput}[outa]");
+    if (subtitlePath is not null)
+    {
+        await File.WriteAllTextAsync(
+            subtitlePath,
+            CreateTimestampSubtitles(timestampSegments, timestampTimezoneOffsetMinutes!.Value),
+            Encoding.UTF8,
+            token);
+        var subtitleFilterPath = EscapeFfmpegFilterValue(subtitlePath);
+        filters.Add(
+            $"[sessionv]subtitles=filename='{subtitleFilterPath}':" +
+            "force_style='FontName=DejaVu Sans,FontSize=24,PrimaryColour=&H00FFFFFF," +
+            "OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Alignment=2,MarginV=11'[outv]");
+    }
 
     arguments.AddRange(new[]
     {
@@ -1375,7 +1465,53 @@ static async Task<string> CreateVideoSessionDownloadAsync(
         TryDelete(temporaryPath);
         throw;
     }
+    finally
+    {
+        if (subtitlePath is not null) TryDelete(subtitlePath);
+    }
 }
+
+static string CreateTimestampSubtitles(
+    IEnumerable<TimestampSegment> segments,
+    int timezoneOffsetMinutes)
+{
+    var builder = new StringBuilder();
+    var cueNumber = 1;
+    foreach (var segment in segments)
+    {
+        var elapsed = 0d;
+        while (elapsed < segment.DurationSeconds - 0.0005)
+        {
+            var recordedAtUtc = segment.RecordedStartUtc.AddSeconds(elapsed);
+            var fractionalSecond = recordedAtUtc.Ticks % TimeSpan.TicksPerSecond /
+                (double)TimeSpan.TicksPerSecond;
+            var untilNextSecond = fractionalSecond < 0.000001 ? 1d : 1d - fractionalSecond;
+            var cueDuration = Math.Min(untilNextSecond, segment.DurationSeconds - elapsed);
+            var localRecordedAt = recordedAtUtc.AddMinutes(-timezoneOffsetMinutes);
+            builder.Append(cueNumber++).AppendLine();
+            builder.Append(FormatSubtitleTime(segment.OutputStartSeconds + elapsed))
+                .Append(" --> ")
+                .Append(FormatSubtitleTime(segment.OutputStartSeconds + elapsed + cueDuration))
+                .AppendLine();
+            builder.Append(localRecordedAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))
+                .AppendLine().AppendLine();
+            elapsed += cueDuration;
+        }
+    }
+    return builder.ToString();
+}
+
+static string FormatSubtitleTime(double seconds)
+{
+    var totalMilliseconds = Math.Max(0L, (long)Math.Round(seconds * 1000));
+    var time = TimeSpan.FromMilliseconds(totalMilliseconds);
+    return $"{(long)time.TotalHours:00}:{time.Minutes:00}:{time.Seconds:00},{time.Milliseconds:000}";
+}
+
+static string EscapeFfmpegFilterValue(string value) => value
+    .Replace("\\", "\\\\", StringComparison.Ordinal)
+    .Replace(":", "\\:", StringComparison.Ordinal)
+    .Replace("'", "\\'", StringComparison.Ordinal);
 
 static async Task<VideoProbeInfo> ReadVideoProbeInfoAsync(
     string filePath,
@@ -1892,6 +2028,10 @@ public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
 public sealed record VideoProbeInfo(double DurationSeconds, bool HasAudio);
+public sealed record TimestampSegment(
+    double OutputStartSeconds,
+    double DurationSeconds,
+    DateTime RecordedStartUtc);
 public sealed record VideoCleanupResult(
     int RemovedCount,
     long RemovedBytes,
