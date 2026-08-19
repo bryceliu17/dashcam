@@ -785,7 +785,26 @@ app.MapGet("/api/videos/{id:int}/download", async (int id, DashcamDbContext db, 
     var video = await db.Videos.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
     if (video is null) return Results.NotFound();
     if (!File.Exists(video.FilePath)) return Results.NotFound(new { error = "Video file is missing." });
-    return Results.File(video.FilePath, "video/mp4", video.OriginalFilename, enableRangeProcessing: true);
+    if (video.PlaybackRotationDegrees == 0)
+        return Results.File(video.FilePath, "video/mp4", video.OriginalFilename, enableRangeProcessing: true);
+
+    var rotatedPath = await CreateRotationAwareDownloadAsync(video, token);
+    try
+    {
+        var stream = new FileStream(
+            rotatedPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+        return Results.Stream(stream, "video/mp4", video.OriginalFilename, enableRangeProcessing: true);
+    }
+    catch
+    {
+        TryDelete(rotatedPath);
+        throw;
+    }
 });
 
 app.MapDelete("/api/videos/{id:int}", async (int id, DashcamDbContext db, CancellationToken token) =>
@@ -1196,6 +1215,109 @@ static bool TryDelete(string path)
 }
 
 static bool IsValidRotation(int degrees) => degrees is 0 or 90 or 180 or 270;
+
+static int NormalizeRotation(int degrees)
+{
+    var normalized = degrees % 360;
+    return normalized < 0 ? normalized + 360 : normalized;
+}
+
+static async Task<string> CreateRotationAwareDownloadAsync(Video video, CancellationToken token)
+{
+    var embeddedRotation = await ReadEmbeddedVideoRotationAsync(video.FilePath, token);
+    var downloadRotation = NormalizeRotation(embeddedRotation + video.PlaybackRotationDegrees);
+    var temporaryDirectory = Path.Combine(
+        Path.GetDirectoryName(video.FilePath) ?? Path.GetTempPath(),
+        ".download-temp");
+    Directory.CreateDirectory(temporaryDirectory);
+    var temporaryPath = Path.Combine(
+        temporaryDirectory,
+        $"{Path.GetFileNameWithoutExtension(video.Filename)}-{Guid.NewGuid():N}.mp4");
+
+    var arguments = new[]
+    {
+        "-v", "error", "-y", "-i", video.FilePath,
+        "-map", "0", "-c", "copy",
+        "-metadata:s:v:0", $"rotate={downloadRotation}",
+        "-movflags", "+faststart", temporaryPath
+    };
+
+    try
+    {
+        await RunMediaToolAsync("ffmpeg", arguments, token);
+        return temporaryPath;
+    }
+    catch
+    {
+        TryDelete(temporaryPath);
+        throw;
+    }
+}
+
+static async Task<int> ReadEmbeddedVideoRotationAsync(string filePath, CancellationToken token)
+{
+    var output = await RunMediaToolAsync("ffprobe", new[]
+    {
+        "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream_tags=rotate:stream_side_data=rotation",
+        "-of", "json", filePath
+    }, token);
+
+    using var document = JsonDocument.Parse(output);
+    if (!document.RootElement.TryGetProperty("streams", out var streams)) return 0;
+    foreach (var stream in streams.EnumerateArray())
+    {
+        if (stream.TryGetProperty("side_data_list", out var sideData))
+        {
+            foreach (var entry in sideData.EnumerateArray())
+            {
+                if (entry.TryGetProperty("rotation", out var rotation) && rotation.TryGetInt32(out var degrees))
+                    return NormalizeRotation(degrees);
+            }
+        }
+        if (stream.TryGetProperty("tags", out var tags) &&
+            tags.TryGetProperty("rotate", out var rotateTag) &&
+            int.TryParse(rotateTag.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var tagDegrees))
+        {
+            return NormalizeRotation(tagDegrees);
+        }
+    }
+    return 0;
+}
+
+static async Task<string> RunMediaToolAsync(
+    string fileName,
+    IEnumerable<string> arguments,
+    CancellationToken token)
+{
+    var startInfo = new ProcessStartInfo
+    {
+        FileName = fileName,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+    foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+
+    using var process = new Process { StartInfo = startInfo };
+    if (!process.Start()) throw new InvalidOperationException($"{fileName} could not be started.");
+    var outputTask = process.StandardOutput.ReadToEndAsync(token);
+    var errorTask = process.StandardError.ReadToEndAsync(token);
+    try
+    {
+        await Task.WhenAll(outputTask, errorTask, process.WaitForExitAsync(token));
+    }
+    catch
+    {
+        if (!process.HasExited) process.Kill(true);
+        throw;
+    }
+    var error = await errorTask;
+    if (process.ExitCode != 0)
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(error) ? $"{fileName} failed." : error.Trim());
+    return await outputTask;
+}
 
 static async Task EnsurePlaybackRotationColumnAsync(DashcamDbContext db)
 {
