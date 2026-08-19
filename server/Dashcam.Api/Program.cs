@@ -1225,7 +1225,9 @@ static int NormalizeRotation(int degrees)
 static async Task<string> CreateRotationAwareDownloadAsync(Video video, CancellationToken token)
 {
     var embeddedRotation = await ReadEmbeddedVideoRotationAsync(video.FilePath, token);
-    var downloadRotation = NormalizeRotation(embeddedRotation + video.PlaybackRotationDegrees);
+    // ffprobe reports display-matrix rotation counter-clockwise, while the dashboard's
+    // CSS rotation is clockwise. Convert the dashboard adjustment into ffmpeg's sign.
+    var downloadRotation = NormalizeRotation(embeddedRotation - video.PlaybackRotationDegrees);
     var temporaryDirectory = Path.Combine(
         Path.GetDirectoryName(video.FilePath) ?? Path.GetTempPath(),
         ".download-temp");
