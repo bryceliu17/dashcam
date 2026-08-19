@@ -1504,6 +1504,7 @@ export default function App() {
   const [groupAudioSessions, setGroupAudioSessions] = useState(() => readBooleanPreference('dashcam.groupAudioSessions', false))
   const [selectedVideoIds, setSelectedVideoIds] = useState(() => new Set())
   const [selectedAudioIds, setSelectedAudioIds] = useState(() => new Set())
+  const [rotatingVideoIds, setRotatingVideoIds] = useState(() => new Set())
   const [bulkRotation, setBulkRotation] = useState(90)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [migrationBusy, setMigrationBusy] = useState(false)
@@ -1735,6 +1736,7 @@ export default function App() {
   const rotatePlayback = async (video) => {
     if (rotationRequests.current.has(video.id)) return
     rotationRequests.current.add(video.id)
+    setRotatingVideoIds(current => new Set(current).add(video.id))
     const playbackRotationDegrees = ((video.playbackRotationDegrees || 0) + 90) % 360
     const optimistic = { ...video, playbackRotationDegrees }
     const updateVideoState = updated => {
@@ -1757,6 +1759,11 @@ export default function App() {
       setError(err.message)
     } finally {
       rotationRequests.current.delete(video.id)
+      setRotatingVideoIds(current => {
+        const next = new Set(current)
+        next.delete(video.id)
+        return next
+      })
     }
   }
 
@@ -1804,6 +1811,7 @@ export default function App() {
     const ids = [...selectedVideoIds]
     if (!ids.length) return
     setBulkBusy(true)
+    setRotatingVideoIds(current => new Set([...current, ...ids]))
     setError('')
     try {
       const result = await api('/api/videos/bulk/rotation', {
@@ -1817,7 +1825,14 @@ export default function App() {
       await refresh()
       if (result.notFoundIds.length) setError(`${result.notFoundIds.length} selected video(s) no longer exist.`)
     } catch (err) { setError(err.message) }
-    finally { setBulkBusy(false) }
+    finally {
+      setBulkBusy(false)
+      setRotatingVideoIds(current => {
+        const next = new Set(current)
+        ids.forEach(id => next.delete(id))
+        return next
+      })
+    }
   }
 
   const bulkRemove = async (type) => {
@@ -2085,7 +2100,12 @@ export default function App() {
               <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? 'Locked' : 'Unlocked'}</span></td>
               <td><div className="actions">
                 <button title="Play" onClick={() => setSelected(video)}><Icon name="play" /></button>
-                <a title="Download" href={`${API}/api/videos/${video.id}/download`}><Icon name="download" /></a>
+                <a
+                  className={rotatingVideoIds.has(video.id) ? 'disabled' : ''}
+                  title={rotatingVideoIds.has(video.id) ? 'Saving rotation…' : 'Download'}
+                  aria-disabled={rotatingVideoIds.has(video.id)}
+                  href={rotatingVideoIds.has(video.id) ? undefined : `${API}/api/videos/${video.id}/download?rotation=${video.playbackRotationDegrees || 0}`}
+                ><Icon name="download" /></a>
                 <button title={video.locked ? 'Unlock' : 'Lock'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
                 <button className="danger" title="Delete" onClick={() => remove(video)}><Icon name="trash" /></button>
               </div></td>

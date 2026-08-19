@@ -780,8 +780,12 @@ app.MapGet("/api/videos/{id:int}/stream", async (int id, DashcamDbContext db, Ca
     return Results.File(video.FilePath, "video/mp4", enableRangeProcessing: true);
 });
 
-app.MapGet("/api/videos/{id:int}/download", async (int id, DashcamDbContext db, CancellationToken token) =>
+app.MapGet("/api/videos/{id:int}/download", async (
+    int id, HttpContext context, DashcamDbContext db, CancellationToken token) =>
 {
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers.Expires = "0";
     var video = await db.Videos.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, token);
     if (video is null) return Results.NotFound();
     if (!File.Exists(video.FilePath)) return Results.NotFound(new { error = "Video file is missing." });
