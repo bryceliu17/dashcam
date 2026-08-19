@@ -21,9 +21,6 @@ object RecordingStartAlert {
 
     fun show(context: Context) {
         playTone()
-        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (powerManager.isInteractive) return
-
         context.applicationContext.startActivity(
             Intent(context.applicationContext, RecordingStartAlertActivity::class.java).apply {
                 addFlags(
