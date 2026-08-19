@@ -144,6 +144,34 @@ function Icon({ name }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
 }
 
+function SessionSelectionCheckbox({ items, selectedIds, setSelectedIds, label }) {
+  const inputRef = useRef(null)
+  const ids = items.map(item => item.id)
+  const allSelected = ids.length > 0 && ids.every(id => selectedIds.has(id))
+  const partiallySelected = !allSelected && ids.some(id => selectedIds.has(id))
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = partiallySelected
+  }, [partiallySelected])
+
+  const toggleSession = () => setSelectedIds(current => {
+    const next = new Set(current)
+    const removeSession = ids.length > 0 && ids.every(id => current.has(id))
+    ids.forEach(id => removeSession ? next.delete(id) : next.add(id))
+    return next
+  })
+
+  return <input
+    ref={inputRef}
+    className="session-select-checkbox"
+    type="checkbox"
+    checked={allSelected}
+    onChange={toggleSession}
+    aria-label={label}
+    title={label}
+  />
+}
+
 function ArchiveDatePicker({ value, onChange, archiveType, lockFilter }) {
   const rootRef = useRef(null)
   const selected = value ? fromDateInput(value) : undefined
@@ -2046,7 +2074,7 @@ export default function App() {
             const sessionStart = videoSessions.starts.get(index)
             const sessionEnd = videoSessions.ends.get(index)
             if (groupVideoSessions && sessionStart) rows.push(
-              <tr className="session-header" key={`session-header-${video.id}`}><td colSpan="8"><div><span><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'video' : 'videos'}</small></span><button type="button" onClick={() => setSelectedSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
+              <tr className="session-header" key={`session-header-${video.id}`}><td colSpan="8"><div><span><SessionSelectionCheckbox items={sessionStart.videos} selectedIds={selectedVideoIds} setSelectedIds={setSelectedVideoIds} label={`Select all videos in session ${sessionStart.number}`} /><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'video' : 'videos'}</small></span><button type="button" onClick={() => setSelectedSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
             )
             rows.push(<tr className={groupVideoSessions ? 'video-row grouped' : 'video-row'} key={video.id}>
               <td className="select-cell"><input type="checkbox" checked={selectedVideoIds.has(video.id)} onChange={() => toggleSelection(setSelectedVideoIds, video.id)} aria-label={`Select ${video.originalFilename || video.filename}`} /></td>
@@ -2075,7 +2103,7 @@ export default function App() {
             const sessionStart = audioSessions.starts.get(index)
             const sessionEnd = audioSessions.ends.get(index)
             if (groupAudioSessions && sessionStart) rows.push(
-              <tr className="session-header" key={`audio-session-header-${recording.id}`}><td colSpan="7"><div><span><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'recording' : 'recordings'}</small></span><button type="button" onClick={() => setSelectedAudioSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
+              <tr className="session-header" key={`audio-session-header-${recording.id}`}><td colSpan="7"><div><span><SessionSelectionCheckbox items={sessionStart.recordings} selectedIds={selectedAudioIds} setSelectedIds={setSelectedAudioIds} label={`Select all recordings in session ${sessionStart.number}`} /><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'recording' : 'recordings'}</small></span><button type="button" onClick={() => setSelectedAudioSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
             )
             rows.push(<tr className={groupAudioSessions ? 'audio-row grouped' : 'audio-row'} key={recording.id}>
               <td className="select-cell"><input type="checkbox" checked={selectedAudioIds.has(recording.id)} onChange={() => toggleSelection(setSelectedAudioIds, recording.id)} aria-label={`Select ${recording.originalFilename || recording.filename}`} /></td>
