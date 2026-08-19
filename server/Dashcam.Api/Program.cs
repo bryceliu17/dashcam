@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -38,6 +39,13 @@ app.UseCors();
 var videoCleanupGate = new SemaphoreSlim(1, 1);
 var audioCleanupGate = new SemaphoreSlim(1, 1);
 var sessionExportGate = new SemaphoreSlim(1, 1);
+var videoExportJobs = new ConcurrentDictionary<Guid, VideoExportJob>();
+
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    foreach (var job in videoExportJobs.Values)
+        if (job.ExportPath is not null) TryDelete(job.ExportPath);
+});
 
 app.Use(async (context, next) =>
 {
@@ -774,6 +782,134 @@ app.MapDelete("/api/audio/bulk", async (
     });
 });
 
+app.MapPost("/api/video-exports", async (
+    VideoExportRequest request,
+    DashcamDbContext db,
+    CancellationToken token) =>
+{
+    CleanupVideoExportJobs(videoExportJobs);
+    var requestedIds = request.Ids?.ToArray() ?? Array.Empty<int>();
+    if (requestedIds.Length is < 1 or > 200 || requestedIds.Any(id => id <= 0))
+        return Results.BadRequest(new { error = "ids must contain between 1 and 200 positive video IDs." });
+    if (requestedIds.Distinct().Count() != requestedIds.Length)
+        return Results.BadRequest(new { error = "ids must not contain duplicate video IDs." });
+
+    var videos = await db.Videos.AsNoTracking()
+        .Where(video => requestedIds.Contains(video.Id))
+        .OrderBy(video => video.StartTime)
+        .ToListAsync(token);
+    if (videos.Count != requestedIds.Length)
+        return Results.BadRequest(new { error = "One or more selected videos no longer exist." });
+    if (videos.Any(video => !File.Exists(video.FilePath)))
+        return Results.NotFound(new { error = "One or more selected video files are missing." });
+    if (videos.Zip(videos.Skip(1), (older, newer) => VideoGapSeconds(newer, older)).Any(gap => gap > 10))
+        return Results.BadRequest(new { error = "The selected videos do not form one continuous session." });
+
+    var timezoneOffset = request.WithTimestamp
+        ? Math.Clamp(request.TimezoneOffsetMinutes, -14 * 60, 14 * 60)
+        : (int?)null;
+    var first = AsUtc(videos[0].StartTime);
+    var last = AsUtc(videos[^1].EndTime);
+    var suffix = request.WithTimestamp ? "_with_time" : string.Empty;
+    var filename = videos.Count == 1
+        ? $"{Path.GetFileNameWithoutExtension(videos[0].OriginalFilename)}{suffix}.mp4"
+        : $"dashcam_session_{first:yyyyMMdd_HHmmss}_{last:HHmmss}{suffix}.mp4";
+    var jobId = Guid.NewGuid();
+    var job = new VideoExportJob(
+        jobId,
+        "queued",
+        null,
+        filename,
+        null,
+        DateTime.UtcNow,
+        null);
+    videoExportJobs[jobId] = job;
+
+    _ = Task.Run(async () =>
+    {
+        await sessionExportGate.WaitAsync();
+        videoExportJobs.AddOrUpdate(
+            jobId,
+            job with { Status = "processing" },
+            (_, current) => current with { Status = "processing" });
+        try
+        {
+            var exportPath = await CreateVideoSessionDownloadAsync(videos, timezoneOffset, CancellationToken.None);
+            videoExportJobs.AddOrUpdate(
+                jobId,
+                job with { Status = "ready", ExportPath = exportPath, CompletedAtUtc = DateTime.UtcNow },
+                (_, current) => current with
+                {
+                    Status = "ready",
+                    ExportPath = exportPath,
+                    CompletedAtUtc = DateTime.UtcNow
+                });
+        }
+        catch (Exception exception)
+        {
+            app.Logger.LogError(exception, "Video export job {VideoExportJobId} failed", jobId);
+            videoExportJobs.AddOrUpdate(
+                jobId,
+                job with { Status = "failed", Error = "Video export failed.", CompletedAtUtc = DateTime.UtcNow },
+                (_, current) => current with
+                {
+                    Status = "failed",
+                    Error = "Video export failed.",
+                    CompletedAtUtc = DateTime.UtcNow
+                });
+        }
+        finally
+        {
+            sessionExportGate.Release();
+        }
+    });
+
+    return Results.Accepted($"/api/video-exports/{jobId}", ToVideoExportJobResponse(job));
+});
+
+app.MapGet("/api/video-exports/{jobId:guid}", (Guid jobId) =>
+{
+    CleanupVideoExportJobs(videoExportJobs);
+    return videoExportJobs.TryGetValue(jobId, out var job)
+        ? Results.Ok(ToVideoExportJobResponse(job))
+        : Results.NotFound(new { error = "Video export no longer exists." });
+});
+
+app.MapGet("/api/video-exports/{jobId:guid}/download", (
+    Guid jobId,
+    HttpContext context) =>
+{
+    if (!videoExportJobs.TryRemove(jobId, out var job))
+        return Results.NotFound(new { error = "Video export no longer exists." });
+    if (job.Status != "ready" || job.ExportPath is null)
+    {
+        videoExportJobs.TryAdd(jobId, job);
+        return Results.Conflict(new { error = "Video export is not ready yet." });
+    }
+    if (!File.Exists(job.ExportPath))
+        return Results.NotFound(new { error = "The generated video file is missing." });
+
+    context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+    context.Response.Headers.Pragma = "no-cache";
+    context.Response.Headers.Expires = "0";
+    try
+    {
+        var stream = new FileStream(
+            job.ExportPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+        return Results.Stream(stream, "video/mp4", job.Filename, enableRangeProcessing: true);
+    }
+    catch
+    {
+        TryDelete(job.ExportPath);
+        throw;
+    }
+});
+
 app.MapGet("/api/videos/session/download", async (
     string ids,
     bool? withTimestamp,
@@ -1342,6 +1478,31 @@ static int NormalizeRotation(int degrees)
 
 static double VideoGapSeconds(Video newer, Video older) =>
     Math.Max(0, (newer.StartTime - older.EndTime).TotalSeconds);
+
+static object ToVideoExportJobResponse(VideoExportJob job) => new
+{
+    jobId = job.Id,
+    status = job.Status,
+    error = job.Error,
+    filename = job.Filename,
+    downloadUrl = job.Status == "ready" ? $"/api/video-exports/{job.Id}/download" : null
+};
+
+static void CleanupVideoExportJobs(ConcurrentDictionary<Guid, VideoExportJob> jobs)
+{
+    var cutoff = DateTime.UtcNow.AddMinutes(-30);
+    foreach (var pair in jobs)
+    {
+        var job = pair.Value;
+        if (job.Status is not ("ready" or "failed") ||
+            (job.CompletedAtUtc ?? job.CreatedAtUtc) >= cutoff ||
+            !jobs.TryRemove(pair.Key, out var removed))
+        {
+            continue;
+        }
+        if (removed.ExportPath is not null) TryDelete(removed.ExportPath);
+    }
+}
 
 static async Task<string> CreateVideoSessionDownloadAsync(
     IReadOnlyList<Video> videos,
@@ -2027,6 +2188,15 @@ public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
+public sealed record VideoExportRequest(int[] Ids, bool WithTimestamp, int TimezoneOffsetMinutes);
+public sealed record VideoExportJob(
+    Guid Id,
+    string Status,
+    string? ExportPath,
+    string Filename,
+    string? Error,
+    DateTime CreatedAtUtc,
+    DateTime? CompletedAtUtc);
 public sealed record VideoProbeInfo(double DurationSeconds, bool HasAudio);
 public sealed record TimestampSegment(
     double OutputStartSeconds,

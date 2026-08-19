@@ -1508,10 +1508,53 @@ export default function App() {
   const [rotatingVideoIds, setRotatingVideoIds] = useState(() => new Set())
   const [bulkRotation, setBulkRotation] = useState(90)
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [videoExport, setVideoExport] = useState(null)
   const [migrationBusy, setMigrationBusy] = useState(false)
   const migrationUploadAbort = useRef(null)
   const rotationRequests = useRef(new Set())
   const batteryHistoryRequest = useRef(0)
+  const videoExportActive = useRef(false)
+
+  const startVideoExport = async ({ key, ids, withTimestamp }) => {
+    if (videoExportActive.current) return
+    videoExportActive.current = true
+    setError('')
+    setVideoExport({ key, status: 'queued', filename: '' })
+    try {
+      let job = await api('/api/video-exports', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids,
+          withTimestamp,
+          timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+        }),
+      })
+      while (job.status === 'queued' || job.status === 'processing') {
+        setVideoExport({ key, status: job.status, filename: job.filename || '' })
+        await new Promise(resolve => window.setTimeout(resolve, 1_000))
+        job = await api(`/api/video-exports/${encodeURIComponent(job.jobId)}`)
+      }
+      if (job.status !== 'ready' || !job.downloadUrl)
+        throw new Error(job.error || 'Video export failed.')
+
+      setVideoExport({ key, status: 'starting', filename: job.filename || '' })
+      const link = document.createElement('a')
+      link.href = `${API}${job.downloadUrl}`
+      link.download = job.filename || ''
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => {
+        videoExportActive.current = false
+        setVideoExport(null)
+      }, 2_000)
+    } catch (err) {
+      videoExportActive.current = false
+      setVideoExport(null)
+      setError(err.message)
+    }
+  }
 
   const loadBatteryHistory = async (device, hours = 24) => {
     const generation = ++batteryHistoryRequest.current
@@ -1987,13 +2030,7 @@ export default function App() {
   const rangeStart = currentTotal === 0 ? 0 : (currentPage - 1) * pageSize + 1
   const rangeEnd = Math.min(currentPage * pageSize, currentTotal)
   const selectedSessionRotating = selectedVideoSession?.videos.some(video => rotatingVideoIds.has(video.id)) || false
-  const downloadTimezoneOffsetMinutes = new Date().getTimezoneOffset()
-  const selectedSessionDownloadUrl = selectedVideoSession
-    ? `${API}/api/videos/session/download?ids=${encodeURIComponent(selectedVideoSession.videos.map(video => video.id).join(','))}&signature=${encodeURIComponent(selectedVideoSession.videos.map(video => `${video.id}-${video.playbackRotationDegrees || 0}`).join('_'))}`
-    : undefined
-  const selectedSessionTimedDownloadUrl = selectedSessionDownloadUrl
-    ? `${selectedSessionDownloadUrl}&withTimestamp=true&timezoneOffsetMinutes=${downloadTimezoneOffsetMinutes}`
-    : undefined
+  const videoExportBusy = videoExport !== null
 
   const changeDate = (value) => {
     setVideoPage(1)
@@ -2029,6 +2066,15 @@ export default function App() {
       </section>
 
       {error && <div className="error">{error}</div>}
+      {videoExport && <div className="download-preparing" role="status" aria-live="polite">
+        {videoExport.status !== 'starting' && <div className="spinner" />}
+        <div><strong>{videoExport.status === 'queued' ? 'Download queued' : videoExport.status === 'processing' ? 'Generating video…' : 'Download starting'}</strong>
+          <small>{videoExport.status === 'queued'
+            ? 'Waiting for the export worker. Please keep this page open.'
+            : videoExport.status === 'processing'
+              ? 'Rotation, timestamps, and session gaps are being rendered. Large videos can take a few minutes.'
+              : `${videoExport.filename || 'Your video'} is ready.`}</small></div>
+      </div>}
 
       <MigrationPanel migration={migration} busy={migrationBusy} folder={migrationFolder} upload={migrationUpload}
         onFolderSelected={selectMigrationFolder} onUpload={uploadMigrationFolder} onStart={startMigration}
@@ -2089,18 +2135,26 @@ export default function App() {
         {selectedIds.size > 0 && <div className="bulk-toolbar" role="toolbar" aria-label="Bulk actions">
           <strong>{selectedIds.size} selected</strong>
           {archiveType === 'video' && <>
-            {selectedVideoSession && <a
-              className={`session-download ${(bulkBusy || selectedSessionRotating) ? 'disabled' : ''}`}
-              href={(bulkBusy || selectedSessionRotating) ? undefined : selectedSessionDownloadUrl}
-              aria-disabled={bulkBusy || selectedSessionRotating}
+            {selectedVideoSession && <button
+              className="session-download"
+              disabled={bulkBusy || selectedSessionRotating || videoExportBusy}
+              onClick={() => startVideoExport({
+                key: 'session-download',
+                ids: selectedVideoSession.videos.map(video => video.id),
+                withTimestamp: false,
+              })}
               title={selectedSessionRotating ? 'Waiting for rotation to save…' : 'Download this session as one video'}
-            ><Icon name="download" />Download session</a>}
-            {selectedVideoSession && <a
-              className={`timestamp-download ${(bulkBusy || selectedSessionRotating) ? 'disabled' : ''}`}
-              href={(bulkBusy || selectedSessionRotating) ? undefined : selectedSessionTimedDownloadUrl}
-              aria-disabled={bulkBusy || selectedSessionRotating}
+            ><Icon name="download" />{videoExport?.key === 'session-download' ? 'Preparing…' : 'Download session'}</button>}
+            {selectedVideoSession && <button
+              className="timestamp-download"
+              disabled={bulkBusy || selectedSessionRotating || videoExportBusy}
+              onClick={() => startVideoExport({
+                key: 'session-time',
+                ids: selectedVideoSession.videos.map(video => video.id),
+                withTimestamp: true,
+              })}
               title={selectedSessionRotating ? 'Waiting for rotation to save…' : 'Download this session with date and time'}
-            ><Icon name="clock" />Download with time</a>}
+            ><Icon name="clock" />{videoExport?.key === 'session-time' ? 'Preparing…' : 'Download with time'}</button>}
             <select className="bulk-rotation-select" value={bulkRotation} onChange={event => setBulkRotation(Number(event.target.value))} disabled={bulkBusy} aria-label="Playback rotation">
               <option value={0}>0 deg</option><option value={90}>90 deg</option><option value={180}>180 deg</option><option value={270}>270 deg</option>
             </select>
@@ -2135,12 +2189,12 @@ export default function App() {
                   aria-disabled={rotatingVideoIds.has(video.id)}
                   href={rotatingVideoIds.has(video.id) ? undefined : `${API}/api/videos/${video.id}/download?rotation=${video.playbackRotationDegrees || 0}`}
                 ><Icon name="download" /></a>
-                <a
-                  className={rotatingVideoIds.has(video.id) ? 'disabled' : ''}
-                  title={rotatingVideoIds.has(video.id) ? 'Saving rotation…' : 'Download with date and time'}
-                  aria-disabled={rotatingVideoIds.has(video.id)}
-                  href={rotatingVideoIds.has(video.id) ? undefined : `${API}/api/videos/${video.id}/download-with-time?timezoneOffsetMinutes=${downloadTimezoneOffsetMinutes}&signature=${video.playbackRotationDegrees || 0}`}
-                ><Icon name="clock" /></a>
+                <button
+                  className={videoExport?.key === `video-${video.id}-time` ? 'exporting' : ''}
+                  disabled={rotatingVideoIds.has(video.id) || videoExportBusy}
+                  title={rotatingVideoIds.has(video.id) ? 'Saving rotation…' : videoExportBusy ? 'Another video export is in progress' : 'Download with date and time'}
+                  onClick={() => startVideoExport({ key: `video-${video.id}-time`, ids: [video.id], withTimestamp: true })}
+                ><Icon name={videoExport?.key === `video-${video.id}-time` ? 'refresh' : 'clock'} /></button>
                 <button title={video.locked ? 'Unlock' : 'Lock'} onClick={() => toggleLock(video)}><Icon name={video.locked ? 'unlock' : 'lock'} /></button>
                 <button className="danger" title="Delete" onClick={() => remove(video)}><Icon name="trash" /></button>
               </div></td>
