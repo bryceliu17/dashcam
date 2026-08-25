@@ -56,7 +56,11 @@ public sealed record BatteryHistorySample(
     int BatteryLevel,
     bool IsCharging,
     bool VideoRecordingActive,
-    bool AudioRecordingActive);
+    bool AudioRecordingActive,
+    int? VoltageMillivolts = null,
+    int? CurrentNowMicroamps = null,
+    int? EstimatedBatteryPowerMilliwatts = null,
+    string ChargingSource = "Unknown");
 
 public sealed record BatteryHistoryResponse(
     string RequestId,

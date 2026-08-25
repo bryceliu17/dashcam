@@ -602,13 +602,27 @@ class MainActivity : ComponentActivity() {
         if (samples.isEmpty()) return "No samples yet. The first sample is recorded when the app starts."
         val values = samples.map { it.temperatureTenthsC / 10.0 }
         val current = values.last()
+        val latest = samples.last()
+        val electrical = mutableListOf<String>()
+        electrical += if (latest.isCharging) latest.chargingSource else "On battery"
+        latest.currentNowMicroamps?.let {
+            electrical += String.format(Locale.getDefault(), "%+.0f mA", it / 1_000.0)
+        }
+        latest.estimatedBatteryPowerMilliwatts?.let {
+            electrical += String.format(Locale.getDefault(), "%+.2f W", it / 1_000.0)
+        }
+        latest.voltageMillivolts?.let {
+            electrical += String.format(Locale.getDefault(), "%.2f V", it / 1_000.0)
+        }
         return String.format(
             Locale.getDefault(),
-            "Current %.1f°C   Minimum %.1f°C   Maximum %.1f°C   Average %.1f°C\n%d samples",
+            "Current %.1f°C   Minimum %.1f°C   Maximum %.1f°C   Average %.1f°C\nBattery %d%%   %s\n%d samples",
             current,
             values.minOrNull() ?: current,
             values.maxOrNull() ?: current,
             values.average(),
+            latest.batteryLevel,
+            electrical.joinToString("   "),
             values.size
         )
     }

@@ -176,13 +176,14 @@ class BatteryTemperatureChartView(context: Context) : View(context) {
                 selectedTimeFormat.format(Date(sample.recordedAt)),
                 sample.temperatureTenthsC / 10.0
             )
-            val detail = "Battery ${sample.batteryLevel}%   ${if (sample.isCharging) "Charging" else "On battery"}"
+            val detail = "Battery ${sample.batteryLevel}%   ${if (sample.isCharging) sample.chargingSource else "On battery"}"
+            val electricalDetail = electricalDetail(sample)
             paint.textSize = 12f * density
             val boxWidth = min(
-                max(paint.measureText(title), paint.measureText(detail)) + 20f * density,
+                max(max(paint.measureText(title), paint.measureText(detail)), paint.measureText(electricalDetail)) + 20f * density,
                 right - left
             )
-            val boxHeight = 48f * density
+            val boxHeight = 66f * density
             val boxLeft = (selectedX - boxWidth / 2).coerceIn(left, right - boxWidth)
             paint.color = Color.rgb(241, 245, 249)
             canvas.drawRoundRect(boxLeft, top, boxLeft + boxWidth, top + boxHeight, 6f * density, 6f * density, paint)
@@ -191,6 +192,21 @@ class BatteryTemperatureChartView(context: Context) : View(context) {
             paint.textSize = 10f * density
             paint.color = Color.rgb(71, 85, 105)
             canvas.drawText(detail, boxLeft + 10f * density, top + 38f * density, paint)
+            paint.textSize = 9f * density
+            canvas.drawText(electricalDetail, boxLeft + 10f * density, top + 55f * density, paint)
         }
+    }
+
+    private fun electricalDetail(sample: BatteryTemperatureSample): String {
+        val current = sample.currentNowMicroamps?.let {
+            String.format(Locale.getDefault(), "Current %+.0f mA", it / 1_000.0)
+        } ?: "Current unavailable"
+        val power = sample.estimatedBatteryPowerMilliwatts?.let {
+            String.format(Locale.getDefault(), "Power %+.2f W", it / 1_000.0)
+        }
+        val voltage = sample.voltageMillivolts?.let {
+            String.format(Locale.getDefault(), "Voltage %.2f V", it / 1_000.0)
+        }
+        return listOfNotNull(current, power, voltage).joinToString("   ")
     }
 }

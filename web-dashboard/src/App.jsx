@@ -1376,6 +1376,12 @@ function MigrationPanel({ migration, busy, folder, upload, onFolderSelected, onU
   </section>
 }
 
+function formatElectrical(value, divisor, unit, digits) {
+  if (!Number.isFinite(value)) return '--'
+  const scaled = value / divisor
+  return `${scaled > 0 ? '+' : ''}${scaled.toFixed(digits)} ${unit}`
+}
+
 function BatteryTemperatureChart({ items = [], hours }) {
   const [selectedIndex, setSelectedIndex] = useState(null)
   const activePointer = useRef(null)
@@ -1451,7 +1457,8 @@ function BatteryTemperatureChart({ items = [], hours }) {
     {selected && <div className="battery-selected-reading">
       <strong>{formatDate(selected.recordedAt)}</strong>
       <span>{(selected.temperatureTenthsC / 10).toFixed(1)}°C</span>
-      <small>Battery {selected.batteryLevel}% · {selected.isCharging ? 'Charging' : 'On battery'}{selected.videoRecordingActive ? ' · Video recording' : ''}{selected.audioRecordingActive ? ' · Audio recording' : ''}</small>
+      <small>Battery {selected.batteryLevel}% · {selected.isCharging ? `${selected.chargingSource || 'Unknown'} charging` : 'On battery'}{selected.videoRecordingActive ? ' · Video recording' : ''}{selected.audioRecordingActive ? ' · Audio recording' : ''}</small>
+      <small>Current {formatElectrical(selected.currentNowMicroamps, 1000, 'mA', 0)} · Battery power {formatElectrical(selected.estimatedBatteryPowerMilliwatts, 1000, 'W', 2)} · Voltage {formatElectrical(selected.voltageMillivolts, 1000, 'V', 2).replace(/^\+/, '')}</small>
     </div>}
   </div>
 }
@@ -1462,6 +1469,7 @@ function BatteryHistoryModal({ state, onRange, onClose }) {
   const minimum = temperatures.length ? Math.min(...temperatures) : null
   const maximum = temperatures.length ? Math.max(...temperatures) : null
   const average = temperatures.length ? temperatures.reduce((sum, value) => sum + value, 0) / temperatures.length : null
+  const latest = state.items.at(-1)
   const value = number => number == null ? '--' : `${number.toFixed(1)}°C`
   return <div className="modal" onMouseDown={onClose}><div className="player battery-history-modal" onMouseDown={event => event.stopPropagation()}>
     <div><strong>{state.device.deviceName} battery temperature</strong><button className="close-player" aria-label="Close battery history" onClick={onClose}>X</button></div>
@@ -1469,6 +1477,12 @@ function BatteryHistoryModal({ state, onRange, onClose }) {
       <div className="battery-range-buttons">{[8, 24, 72].map(hours => <button key={hours} className={state.hours === hours ? 'active' : ''} onClick={() => onRange(hours)}>{hours === 72 ? '3 days' : `${hours} hours`}</button>)}</div>
       {state.loading ? <div className="battery-history-loading"><div className="spinner" /><span>Requesting local history from the phone…</span><small>With HTTP fallback this can take up to one minute.</small></div> : state.error ? <div className="battery-history-error">{state.error}</div> : <>
         <div className="battery-summary"><span>Current<strong>{value(current)}</strong></span><span>Minimum<strong>{value(minimum)}</strong></span><span>Maximum<strong>{value(maximum)}</strong></span><span>Average<strong>{value(average)}</strong></span></div>
+        <div className="battery-charge-summary">
+          <span>Battery / source<strong>{latest ? `${latest.batteryLevel}% · ${latest.isCharging ? latest.chargingSource || 'Unknown' : 'On battery'}` : '--'}</strong></span>
+          <span>Battery current<strong>{formatElectrical(latest?.currentNowMicroamps, 1000, 'mA', 0)}</strong></span>
+          <span>Battery power<strong>{formatElectrical(latest?.estimatedBatteryPowerMilliwatts, 1000, 'W', 2)}</strong></span>
+          <span>Voltage<strong>{formatElectrical(latest?.voltageMillivolts, 1000, 'V', 2).replace(/^\+/, '')}</strong></span>
+        </div>
         <BatteryTemperatureChart items={state.items} hours={state.hours} />
         <p className="battery-history-note">{state.items.length} local samples. Tap or drag left/right across the chart to inspect a time. Orange: 40°C, red: 45°C. The server does not retain this history.</p>
       </>}
