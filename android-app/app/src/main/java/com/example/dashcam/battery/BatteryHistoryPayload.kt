@@ -19,7 +19,11 @@ object BatteryHistoryPayload {
                 .put("batteryLevel", sample.batteryLevel)
                 .put("isCharging", sample.isCharging)
                 .put("videoRecordingActive", sample.videoRecordingActive)
-                .put("audioRecordingActive", sample.audioRecordingActive))
+                .put("audioRecordingActive", sample.audioRecordingActive)
+                .put("voltageMillivolts", sample.voltageMillivolts ?: JSONObject.NULL)
+                .put("currentNowMicroamps", sample.currentNowMicroamps ?: JSONObject.NULL)
+                .put("estimatedBatteryPowerMilliwatts", sample.estimatedBatteryPowerMilliwatts ?: JSONObject.NULL)
+                .put("chargingSource", sample.chargingSource))
         }
         return JSONObject()
             .put("type", "battery_history_response")

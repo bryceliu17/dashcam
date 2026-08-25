@@ -14,7 +14,7 @@ class Converters {
     @TypeConverter fun toStatus(value: String) = UploadStatus.valueOf(value)
 }
 
-@Database(entities = [VideoEntity::class, AudioEntity::class, BatteryTemperatureSample::class], version = 4, exportSchema = false)
+@Database(entities = [VideoEntity::class, AudioEntity::class, BatteryTemperatureSample::class], version = 5, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class DashcamDatabase : RoomDatabase() {
     abstract fun videoDao(): VideoDao
@@ -26,7 +26,7 @@ abstract class DashcamDatabase : RoomDatabase() {
         fun get(context: Context): DashcamDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext, DashcamDatabase::class.java, "dashcam.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -75,6 +75,15 @@ abstract class DashcamDatabase : RoomDatabase() {
                     )
                 """.trimIndent())
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_battery_temperature_samples_recordedAt ON battery_temperature_samples (recordedAt)")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN voltageMillivolts INTEGER")
+                db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN currentNowMicroamps INTEGER")
+                db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN estimatedBatteryPowerMilliwatts INTEGER")
+                db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN chargingSource TEXT NOT NULL DEFAULT 'Unknown'")
             }
         }
     }

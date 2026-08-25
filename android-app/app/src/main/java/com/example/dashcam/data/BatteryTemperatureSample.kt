@@ -12,5 +12,9 @@ data class BatteryTemperatureSample(
     val batteryLevel: Int,
     val isCharging: Boolean,
     val videoRecordingActive: Boolean,
-    val audioRecordingActive: Boolean
+    val audioRecordingActive: Boolean,
+    val voltageMillivolts: Int? = null,
+    val currentNowMicroamps: Int? = null,
+    val estimatedBatteryPowerMilliwatts: Int? = null,
+    val chargingSource: String = "Unknown"
 )
