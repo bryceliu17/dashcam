@@ -24,6 +24,7 @@ builder.Services.AddSingleton<LiveFrameStore>();
 builder.Services.AddSingleton<DeviceWebSocketHub>();
 builder.Services.AddSingleton<BatteryHistoryBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
+builder.Services.AddSingleton<ArchiveStorageSettingsService>();
 builder.Services.AddSingleton<ArchiveMigrationService>();
 builder.Services.AddSingleton<MigrationUploadService>();
 builder.Services.AddHttpClient("TranscriptionWorker", client =>
@@ -377,6 +378,7 @@ app.MapPost("/api/videos/upload", async (
     HttpRequest request,
     DashcamDbContext db,
     IConfiguration configuration,
+    ArchiveStorageSettingsService storageSettings,
     ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
@@ -459,7 +461,7 @@ app.MapPost("/api/videos/upload", async (
 
         try
         {
-            await CleanupVideosAsync(db, configuration, videoCleanupGate, CancellationToken.None);
+            await CleanupVideosAsync(db, storageSettings, videoCleanupGate, CancellationToken.None);
         }
         catch (Exception cleanupError)
         {
@@ -483,6 +485,7 @@ app.MapPost("/api/audio/upload", async (
     HttpRequest request,
     DashcamDbContext db,
     IConfiguration configuration,
+    ArchiveStorageSettingsService storageSettings,
     ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
@@ -557,7 +560,7 @@ app.MapPost("/api/audio/upload", async (
 
         try
         {
-            await CleanupAudioAsync(db, configuration, audioCleanupGate, CancellationToken.None);
+            await CleanupAudioAsync(db, storageSettings, audioCleanupGate, CancellationToken.None);
         }
         catch (Exception cleanupError)
         {
@@ -1356,34 +1359,67 @@ app.MapPatch("/api/videos/{id:int}/rotation", async (
     return Results.Ok(ToResponse(video));
 });
 
-app.MapGet("/api/storage/status", async (DashcamDbContext db, IConfiguration config, CancellationToken token) =>
+app.MapGet("/api/storage/status", async (
+    DashcamDbContext db,
+    ArchiveStorageSettingsService storageSettings,
+    CancellationToken token) =>
 {
     var totalVideoCount = await db.Videos.CountAsync(token);
     var totalSizeBytes = await db.Videos.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
     var totalAudioCount = await db.AudioRecordings.CountAsync(token);
     var totalAudioSizeBytes = await db.AudioRecordings.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
-    var maxStorageBytes = GetMaxStorageBytes(config);
-    var maxAudioStorageBytes = GetMaxAudioStorageBytes(config);
-    var storageRoot = GetStorageRoot(config);
-    Directory.CreateDirectory(storageRoot);
-    var root = Path.GetPathRoot(Path.GetFullPath(storageRoot));
-    var driveAvailable = root is null ? 0 : new DriveInfo(root).AvailableFreeSpace;
+    var limits = storageSettings.GetLimits();
+    var recommendation = storageSettings.GetRecommendation();
     return Results.Ok(new
     {
         totalVideoCount,
         totalSizeBytes,
-        maxStorageBytes,
-        availableSpaceBytes = Math.Min(Math.Max(0, maxStorageBytes - totalSizeBytes), driveAvailable),
+        maxStorageBytes = limits.MaxVideoStorageBytes,
+        maxStorageGb = limits.MaxVideoStorageGb,
+        availableSpaceBytes = Math.Min(
+            Math.Max(0, limits.MaxVideoStorageBytes - totalSizeBytes),
+            recommendation.DiskAvailableBytes),
         totalAudioCount,
         totalAudioSizeBytes,
-        maxAudioStorageBytes,
-        audioAvailableSpaceBytes = Math.Min(Math.Max(0, maxAudioStorageBytes - totalAudioSizeBytes), driveAvailable)
+        maxAudioStorageBytes = limits.MaxAudioStorageBytes,
+        maxAudioStorageGb = limits.MaxAudioStorageGb,
+        audioAvailableSpaceBytes = Math.Min(
+            Math.Max(0, limits.MaxAudioStorageBytes - totalAudioSizeBytes),
+            recommendation.DiskAvailableBytes),
+        recommendation.DiskTotalBytes,
+        recommendation.DiskAvailableBytes,
+        recommendation.RecommendedCombinedStorageBytes,
+        recommendation.RecommendedVideoStorageBytes,
+        recommendation.RecommendedAudioStorageBytes,
+        recommendation.UsesSharedDisk,
+        recommendationPercent = ArchiveStorageSettingsService.RecommendationRatio * 100
     });
 });
 
-app.MapPost("/api/videos/cleanup", async (DashcamDbContext db, IConfiguration config, CancellationToken token) =>
+app.MapPut("/api/storage/settings", (
+    ArchiveStorageSettingsRequest request,
+    ArchiveStorageSettingsService storageSettings) =>
 {
-    var cleanup = await CleanupVideosAsync(db, config, videoCleanupGate, token);
+    try
+    {
+        var limits = storageSettings.Save(request.MaxVideoStorageGb, request.MaxAudioStorageGb);
+        return Results.Ok(new
+        {
+            limits.MaxVideoStorageGb,
+            limits.MaxAudioStorageGb,
+            limits.MaxVideoStorageBytes,
+            limits.MaxAudioStorageBytes
+        });
+    }
+    catch (ArgumentOutOfRangeException error)
+    {
+        return Results.BadRequest(new { error = error.Message });
+    }
+});
+
+app.MapPost("/api/videos/cleanup", async (DashcamDbContext db, ArchiveStorageSettingsService storageSettings, CancellationToken token) =>
+{
+    var cleanup = await CleanupVideosAsync(db, storageSettings, videoCleanupGate, token);
     return Results.Ok(new
     {
         cleanup.RemovedCount,
@@ -1393,9 +1429,9 @@ app.MapPost("/api/videos/cleanup", async (DashcamDbContext db, IConfiguration co
     });
 });
 
-app.MapPost("/api/audio/cleanup", async (DashcamDbContext db, IConfiguration config, CancellationToken token) =>
+app.MapPost("/api/audio/cleanup", async (DashcamDbContext db, ArchiveStorageSettingsService storageSettings, CancellationToken token) =>
 {
-    var cleanup = await CleanupAudioAsync(db, config, audioCleanupGate, token);
+    var cleanup = await CleanupAudioAsync(db, storageSettings, audioCleanupGate, token);
     return Results.Ok(new
     {
         cleanup.RemovedCount,
@@ -1490,22 +1526,16 @@ static string GetAudioStorageRoot(IConfiguration config)
     return Path.GetFullPath(path);
 }
 
-static long GetMaxStorageBytes(IConfiguration config)
-{
-    var maxGb = config.GetValue<double?>("MaxStorageGB") ?? 280;
-    return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
-}
-
 static async Task<VideoCleanupResult> CleanupVideosAsync(
     DashcamDbContext db,
-    IConfiguration config,
+    ArchiveStorageSettingsService storageSettings,
     SemaphoreSlim cleanupGate,
     CancellationToken token)
 {
     await cleanupGate.WaitAsync(token);
     try
     {
-        var maxBytes = GetMaxStorageBytes(config);
+        var maxBytes = storageSettings.GetLimits().MaxVideoStorageBytes;
         var totalBytes = await db.Videos.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
         var removedCount = 0;
         var removedBytes = 0L;
@@ -1541,14 +1571,14 @@ static async Task<VideoCleanupResult> CleanupVideosAsync(
 
 static async Task<VideoCleanupResult> CleanupAudioAsync(
     DashcamDbContext db,
-    IConfiguration config,
+    ArchiveStorageSettingsService storageSettings,
     SemaphoreSlim cleanupGate,
     CancellationToken token)
 {
     await cleanupGate.WaitAsync(token);
     try
     {
-        var maxBytes = GetMaxAudioStorageBytes(config);
+        var maxBytes = storageSettings.GetLimits().MaxAudioStorageBytes;
         var totalBytes = await db.AudioRecordings.SumAsync(x => (long?)x.FileSizeBytes, token) ?? 0;
         var removedCount = 0;
         var removedBytes = 0L;
@@ -1581,12 +1611,6 @@ static async Task<VideoCleanupResult> CleanupAudioAsync(
     {
         cleanupGate.Release();
     }
-}
-
-static long GetMaxAudioStorageBytes(IConfiguration config)
-{
-    var maxGb = config.GetValue<double?>("MaxAudioStorageGB") ?? 20;
-    return (long)(Math.Max(0.1, maxGb) * 1024 * 1024 * 1024);
 }
 
 static async Task<Video?> FindExactVideoDuplicateAsync(
@@ -2618,6 +2642,7 @@ public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
+public sealed record ArchiveStorageSettingsRequest(double MaxVideoStorageGb, double MaxAudioStorageGb);
 public sealed record VideoExportRequest(int[] Ids, bool WithTimestamp, int TimezoneOffsetMinutes);
 public sealed record AudioExportRequest(int[] Ids);
 public sealed record VideoExportJob(

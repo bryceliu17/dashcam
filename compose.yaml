@@ -13,11 +13,13 @@ services:
       VideoStoragePath: /data/videos
       AudioStoragePath: /data/audio
       ImportStagingPath: /data/import-staging
-      MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-280}
+      MaxStorageGB: ${DASHCAM_MAX_STORAGE_GB:-350}
       MaxAudioStorageGB: ${DASHCAM_MAX_AUDIO_STORAGE_GB:-20}
       TranscriptionWorkerUrl: http://transcription:8000
     volumes:
-      - "E:/DashcamData:/data"
+      - type: bind
+        source: ${DASHCAM_DATA_PATH:-./data}
+        target: /data
     depends_on:
       - transcription
 
@@ -34,7 +36,10 @@ services:
       WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_CACHE: /models
     volumes:
-      - "E:/DashcamData:/data:ro"
+      - type: bind
+        source: ${DASHCAM_DATA_PATH:-./data}
+        target: /data
+        read_only: true
       - transcription-models:/models
 
   web:

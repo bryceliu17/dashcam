@@ -121,21 +121,25 @@ Open:
 
 On each Android phone, set the server URL to the computer's LAN address, for example `http://192.168.1.50:5000`. Do not use `localhost` on the phone.
 
-Docker persists data outside the containers by default:
+Docker persists data in the `data` folder beside `compose.yaml` by default:
 
 ```text
-D:\DashcamData\dashcam.db
-D:\DashcamData\videos\YYYY-MM-DD\
-D:\DashcamData\audio\YYYY-MM-DD\
+data\dashcam.db
+data\videos\YYYY-MM-DD\
+data\audio\YYYY-MM-DD\
 ```
 
-Create a `.env` file beside `compose.yaml` to change the location or server limits:
+Copy `.env.example` to `.env` to use another host location. The container paths remain `/data/...` on every operating system:
 
 ```dotenv
+# Windows
 DASHCAM_DATA_PATH=E:/DashcamData
-DASHCAM_MAX_STORAGE_GB=235
-DASHCAM_MAX_AUDIO_STORAGE_GB=15
+
+# Linux
+# DASHCAM_DATA_PATH=/srv/dashcam-data
 ```
+
+The local `.env` file is ignored by Git, so every server can choose its own path without changing `compose.yaml`.
 
 Useful commands:
 
@@ -167,7 +171,7 @@ The API listens on the URL in `launchSettings.json` during development. Configur
   "ConnectionStrings": { "DashcamDatabase": "Data Source=dashcam.db" },
   "VideoStoragePath": "videos",
   "AudioStoragePath": "audio",
-  "MaxStorageGB": 235,
+  "MaxStorageGB": 350,
   "MaxAudioStorageGB": 15
 }
 ```
@@ -391,21 +395,25 @@ docker compose up -d --build
 
 Android 手机中的服务器地址必须填写电脑局域网地址，例如 `http://192.168.1.50:5000`，不能填写手机自己的 `localhost`。
 
-Docker 默认把持久数据保存到容器外：
+Docker 默认把持久数据保存在 `compose.yaml` 旁的 `data` 文件夹：
 
 ```text
-D:\DashcamData\dashcam.db
-D:\DashcamData\videos\YYYY-MM-DD\
-D:\DashcamData\audio\YYYY-MM-DD\
+data\dashcam.db
+data\videos\YYYY-MM-DD\
+data\audio\YYYY-MM-DD\
 ```
 
-如需修改位置或服务端容量，在 `compose.yaml` 旁创建 `.env`：
+复制 `.env.example` 为 `.env` 即可修改电脑上的保存位置。不同系统中，容器内部路径始终保持 `/data/...`：
 
 ```dotenv
+# Windows
 DASHCAM_DATA_PATH=E:/DashcamData
-DASHCAM_MAX_STORAGE_GB=235
-DASHCAM_MAX_AUDIO_STORAGE_GB=15
+
+# Linux
+# DASHCAM_DATA_PATH=/srv/dashcam-data
 ```
+
+本机 `.env` 已被 Git 忽略，因此每台服务器可以使用自己的目录，不需要修改 `compose.yaml`。
 
 常用命令：
 
@@ -437,7 +445,7 @@ dotnet run
   "ConnectionStrings": { "DashcamDatabase": "Data Source=dashcam.db" },
   "VideoStoragePath": "videos",
   "AudioStoragePath": "audio",
-  "MaxStorageGB": 235,
+  "MaxStorageGB": 350,
   "MaxAudioStorageGB": 15
 }
 ```

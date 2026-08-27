@@ -1526,6 +1526,9 @@ export default function App() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [videoExport, setVideoExport] = useState(null)
   const [audioExport, setAudioExport] = useState(null)
+  const [storageSettingsOpen, setStorageSettingsOpen] = useState(false)
+  const [storageSettingsSaving, setStorageSettingsSaving] = useState(false)
+  const [storageDraft, setStorageDraft] = useState({ video: '', audio: '' })
   const [migrationBusy, setMigrationBusy] = useState(false)
   const migrationUploadAbort = useRef(null)
   const rotationRequests = useRef(new Set())
@@ -1729,6 +1732,49 @@ export default function App() {
     ? Math.min(100, storage.totalSizeBytes / storage.maxStorageBytes * 100) : 0, [storage])
   const audioStoragePercent = useMemo(() => storage
     ? Math.min(100, storage.totalAudioSizeBytes / storage.maxAudioStorageBytes * 100) : 0, [storage])
+
+  const openStorageSettings = () => {
+    if (storage) setStorageDraft({
+      video: String(storage.maxStorageGb ?? (storage.maxStorageBytes / 1024 ** 3).toFixed(1)),
+      audio: String(storage.maxAudioStorageGb ?? (storage.maxAudioStorageBytes / 1024 ** 3).toFixed(1)),
+    })
+    setStorageSettingsOpen(true)
+  }
+
+  const useRecommendedStorage = () => {
+    if (!storage) return
+    setStorageDraft({
+      video: (storage.recommendedVideoStorageBytes / 1024 ** 3).toFixed(1),
+      audio: (storage.recommendedAudioStorageBytes / 1024 ** 3).toFixed(1),
+    })
+  }
+
+  const saveStorageSettings = async event => {
+    event.preventDefault()
+    const maxVideoStorageGb = Number(storageDraft.video)
+    const maxAudioStorageGb = Number(storageDraft.audio)
+    if (!Number.isFinite(maxVideoStorageGb) || maxVideoStorageGb < 0.1 ||
+        !Number.isFinite(maxAudioStorageGb) || maxAudioStorageGb < 0.1) {
+      setError('Video and audio limits must each be at least 0.1 GB.')
+      return
+    }
+    setStorageSettingsSaving(true)
+    setError('')
+    try {
+      await api('/api/storage/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxVideoStorageGb, maxAudioStorageGb }),
+      })
+      const status = await api('/api/storage/status')
+      setStorage(status)
+      setStorageSettingsOpen(false)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setStorageSettingsSaving(false)
+    }
+  }
   const videoSessions = useMemo(() => {
     const starts = new Map()
     const ends = new Map()
@@ -2170,6 +2216,34 @@ export default function App() {
         <article><span>Total audio</span><strong>{storage?.totalAudioCount ?? '-'}</strong><small>Archived recordings</small></article>
         <article className="capacity"><span>Audio storage</span><strong>{storage ? formatBytes(storage.totalAudioSizeBytes) : '-'}</strong><div><i style={{ width: `${audioStoragePercent}%` }} /></div><small>{audioStoragePercent.toFixed(1)}% of {storage ? formatBytes(storage.maxAudioStorageBytes) : '-'}</small></article>
       </section>
+
+      <section className="storage-limit-summary">
+        <div>
+          <strong>Archive capacity limits</strong>
+          <span>{storage?.diskTotalBytes
+            ? `${formatBytes(storage.diskAvailableBytes)} free on a ${formatBytes(storage.diskTotalBytes)} disk`
+            : 'Disk capacity is unavailable'}</span>
+          <small>{storage?.recommendedCombinedStorageBytes
+            ? `Recommended combined video and audio budget: ${formatBytes(storage.recommendedCombinedStorageBytes)} (${storage.recommendationPercent}% of disk)`
+            : 'The recommendation will appear when disk information is available.'}</small>
+        </div>
+        <button type="button" onClick={openStorageSettings} disabled={!storage}>Set limits</button>
+      </section>
+
+      {storageSettingsOpen && <form className="storage-settings-panel" onSubmit={saveStorageSettings}>
+        <div className="storage-setting-fields">
+          <label><span>Video limit</span><div><input type="number" min="0.1" max="1000000" step="0.1" value={storageDraft.video} onChange={event => setStorageDraft(current => ({ ...current, video: event.target.value }))} required /><b>GB</b></div></label>
+          <label><span>Audio limit</span><div><input type="number" min="0.1" max="1000000" step="0.1" value={storageDraft.audio} onChange={event => setStorageDraft(current => ({ ...current, audio: event.target.value }))} required /><b>GB</b></div></label>
+        </div>
+        <p>The 76% recommendation is one combined budget, split using your current video/audio ratio. Saving a lower limit does not delete files immediately; it applies to future cleanup.</p>
+        {storage && (Number(storageDraft.video) * 1024 ** 3 < storage.totalSizeBytes || Number(storageDraft.audio) * 1024 ** 3 < storage.totalAudioSizeBytes) &&
+          <p className="storage-settings-warning">One new limit is below current usage. Future cleanup can delete the oldest unlocked recordings until usage fits.</p>}
+        <div className="storage-setting-actions">
+          <button type="button" onClick={useRecommendedStorage} disabled={!storage?.recommendedCombinedStorageBytes}>Use 76% recommendation</button>
+          <button type="button" onClick={() => setStorageSettingsOpen(false)} disabled={storageSettingsSaving}>Cancel</button>
+          <button type="submit" className="primary" disabled={storageSettingsSaving}>{storageSettingsSaving ? 'Saving…' : 'Save limits'}</button>
+        </div>
+      </form>}
 
       {error && <div className="error">{error}</div>}
       {videoExport && <div className="download-preparing" role="status" aria-live="polite">

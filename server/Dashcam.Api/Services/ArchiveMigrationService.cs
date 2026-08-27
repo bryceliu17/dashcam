@@ -27,6 +27,7 @@ public sealed class ArchiveMigrationService
     private readonly IConfiguration configuration;
     private readonly ILogger<ArchiveMigrationService> logger;
     private readonly ArchiveMutationGate mutationGate;
+    private readonly ArchiveStorageSettingsService storageSettings;
     private readonly object sync = new();
     private CancellationTokenSource? jobCancellation;
     private MigrationPlan? plan;
@@ -35,11 +36,13 @@ public sealed class ArchiveMigrationService
     public ArchiveMigrationService(
         IConfiguration configuration,
         ILogger<ArchiveMigrationService> logger,
-        ArchiveMutationGate mutationGate)
+        ArchiveMutationGate mutationGate,
+        ArchiveStorageSettingsService storageSettings)
     {
         this.configuration = configuration;
         this.logger = logger;
         this.mutationGate = mutationGate;
+        this.storageSettings = storageSettings;
         status = EmptyStatus("idle", "Place the old server data in the import folder, then scan it.");
     }
 
@@ -213,8 +216,9 @@ public sealed class ArchiveMigrationService
             var totals = await ReadCurrentTotalsAsync(targetDatabase, token);
             var importVideoBytes = items.Where(x => x.Kind == "video").Sum(x => x.FileSizeBytes);
             var importAudioBytes = items.Where(x => x.Kind == "audio").Sum(x => x.FileSizeBytes);
-            var maxVideoBytes = GetLimitBytes("MaxStorageGB", 280);
-            var maxAudioBytes = GetLimitBytes("MaxAudioStorageGB", 20);
+            var limits = storageSettings.GetLimits();
+            var maxVideoBytes = limits.MaxVideoStorageBytes;
+            var maxAudioBytes = limits.MaxAudioStorageBytes;
             var available = GetAvailableSpace(GetVideoRoot());
             var newPlan = new MigrationPlan(sourceDatabase, items, consumeSource, cleanupRoot);
             var nothingToImport = consumeSource && missing.Count == 0 && items.Count == 0;
@@ -286,8 +290,9 @@ public sealed class ArchiveMigrationService
             var totals = await ReadCurrentTotalsAsync(targetDatabase, token);
             var importVideoBytes = selectedPlan.Items.Where(x => x.Kind == "video").Sum(x => x.FileSizeBytes);
             var importAudioBytes = selectedPlan.Items.Where(x => x.Kind == "audio").Sum(x => x.FileSizeBytes);
-            var overCapacity = totals.VideoBytes + importVideoBytes > GetLimitBytes("MaxStorageGB", 280) ||
-                totals.AudioBytes + importAudioBytes > GetLimitBytes("MaxAudioStorageGB", 20);
+            var limits = storageSettings.GetLimits();
+            var overCapacity = totals.VideoBytes + importVideoBytes > limits.MaxVideoStorageBytes ||
+                totals.AudioBytes + importAudioBytes > limits.MaxAudioStorageBytes;
             if (overCapacity && !allowOverCapacity)
                 throw new InvalidOperationException("The archive size changed and now exceeds a configured limit. Scan again.");
 
@@ -708,12 +713,6 @@ public sealed class ArchiveMigrationService
 
     private string GetVideoRoot() => Path.GetFullPath(configuration["VideoStoragePath"] ?? Path.Combine(AppContext.BaseDirectory, "videos"));
     private string GetAudioRoot() => Path.GetFullPath(configuration["AudioStoragePath"] ?? Path.Combine(AppContext.BaseDirectory, "audio"));
-
-    private long GetLimitBytes(string key, double fallbackGb)
-    {
-        var gb = configuration.GetValue<double?>(key) ?? fallbackGb;
-        return (long)(Math.Max(0.1, gb) * 1024 * 1024 * 1024);
-    }
 
     private static long GetAvailableSpace(string path)
     {
