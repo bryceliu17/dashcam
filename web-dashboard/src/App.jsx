@@ -134,6 +134,7 @@ function Icon({ name }) {
     refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .7-8.7L20 11"/></>,
     rotate: <><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 1 1-2-5"/></>,
     camera: <><path d="M7 7 9 4h6l2 3"/><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13.5" r="3.5"/></>,
+    flashlight: <><path d="M9 2h6l1 5-3 3v10h-2V10L8 7z"/><path d="M7 13H4m13 0h3M7.5 16.5 5 19m11.5-2.5L19 19"/></>,
     stop: <rect x="7" y="7" width="10" height="10" rx="1"/>,
     fullscreen: <><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></>,
     fullscreenExit: <><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></>,
@@ -1140,12 +1141,15 @@ function AudioSessionPlayback({ session }) {
   </div>
 }
 
-function LiveViewer({ device, onClose }) {
+function LiveViewer({ device, onClose, onTorch }) {
   const [frameUrl, setFrameUrl] = useState('')
   const [waiting, setWaiting] = useState(true)
   const [rotation, setRotation] = useState(0)
   const [layout, setLayout] = useState({ width: 0, height: 0 })
   const [fullscreen, setFullscreen] = useState(false)
+  const [torchEnabled, setTorchEnabled] = useState(false)
+  const [torchBusy, setTorchBusy] = useState(false)
+  const [torchError, setTorchError] = useState('')
   const objectUrlRef = useRef('')
   const playerRef = useRef(null)
   const stageRef = useRef(null)
@@ -1209,6 +1213,20 @@ function LiveViewer({ device, onClose }) {
       else await playerRef.current?.requestFullscreen()
     } catch {
       setFullscreen(false)
+    }
+  }
+
+  const toggleTorch = async () => {
+    if (torchBusy) return
+    setTorchBusy(true)
+    setTorchError('')
+    try {
+      const result = await onTorch(!torchEnabled)
+      setTorchEnabled(Boolean(result.enabled))
+    } catch (error) {
+      setTorchError(error.message)
+    } finally {
+      setTorchBusy(false)
     }
   }
 
@@ -1278,6 +1296,16 @@ function LiveViewer({ device, onClose }) {
             <Icon name="rotate" />
             <span>Rotate 90 deg</span>
           </button>
+          <button
+            type="button"
+            className={`torch-control${torchEnabled ? ' active' : ''}`}
+            title={torchEnabled ? 'Turn phone flashlight off' : 'Turn phone flashlight on'}
+            disabled={!device.liveStreaming || torchBusy}
+            onClick={toggleTorch}
+          >
+            <Icon name="flashlight" />
+            <span>{torchBusy ? 'Light...' : torchEnabled ? 'Light Off' : 'Light On'}</span>
+          </button>
           <button className="close-player" aria-label="Stop and close live view" title="Stop live view" onClick={onClose}>X</button>
         </span>
       </div>
@@ -1295,7 +1323,7 @@ function LiveViewer({ device, onClose }) {
         />}
         {waiting && <div className="live-waiting"><div className="spinner" /><span>Waiting for phone camera...</span></div>}
       </div>
-      <p>{device.liveError || (device.liveStreaming ? `Live camera connected - view rotation ${rotation} deg` : 'Starting live camera')}</p>
+      <p>{torchError || device.liveError || (device.liveStreaming ? `Live camera connected - view rotation ${rotation} deg${torchEnabled ? ' - flashlight on' : ''}` : 'Starting live camera')}</p>
     </div>
   </div>
 }
@@ -1875,6 +1903,11 @@ export default function App() {
       if (!suppressError) setError(err.message)
     }
   }, [])
+
+  const setLiveTorch = useCallback(async (deviceId, enabled) => api(`/api/devices/${encodeURIComponent(deviceId)}/live/torch`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  }), [])
 
   const toggleLock = async (video) => {
     try {
@@ -2479,7 +2512,7 @@ export default function App() {
         <pre>{selectedTranscript.text || 'No speech was detected in this recording.'}</pre>
       </div>}
     </div></div>}
-    {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} />}
+    {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} onTorch={enabled => setLiveTorch(liveDevice.deviceId, enabled)} />}
     {batteryHistory && <BatteryHistoryModal state={batteryHistory} onRange={hours => loadBatteryHistory(batteryHistory.device, hours)} onClose={closeBatteryHistory} />}
   </div>
 }

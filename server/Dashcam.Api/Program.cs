@@ -23,6 +23,7 @@ builder.Services.AddDbContext<DashcamDbContext>(options => options.UseSqlite(con
 builder.Services.AddSingleton<LiveFrameStore>();
 builder.Services.AddSingleton<DeviceWebSocketHub>();
 builder.Services.AddSingleton<BatteryHistoryBroker>();
+builder.Services.AddSingleton<LiveTorchBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveStorageSettingsService>();
 builder.Services.AddSingleton<ArchiveMigrationService>();
@@ -114,6 +115,7 @@ app.MapGet("/api/devices/socket", async (
     DashcamDbContext db,
     DeviceWebSocketHub sockets,
     BatteryHistoryBroker batteryHistory,
+    LiveTorchBroker liveTorch,
     LiveFrameStore liveFrames,
     IServiceScopeFactory serviceScopeFactory,
     CancellationToken cancellationToken) =>
@@ -163,6 +165,12 @@ app.MapGet("/api/devices/socket", async (
             if (historyResponse is not null)
             {
                 batteryHistory.TryComplete(deviceId, historyResponse);
+                return;
+            }
+            var torchResponse = ParseLiveTorchResponse(message);
+            if (torchResponse is not null)
+            {
+                liveTorch.TryComplete(deviceId, torchResponse);
                 return;
             }
             var heartbeat = ParseSocketHeartbeat(message);
@@ -324,11 +332,60 @@ app.MapPost("/api/devices/{deviceId}/live", async (
 
     device.LiveRequested = request.Enabled;
     await db.SaveChangesAsync(cancellationToken);
+    if (!request.Enabled)
+    {
+        await sockets.SendTorchRequestAsync(
+            deviceId,
+            Guid.NewGuid().ToString("N"),
+            enabled: false,
+            cancellationToken);
+    }
     await sockets.SendLiveRequestAsync(deviceId, request.Enabled, cancellationToken);
     return Results.Ok(ToDeviceResponse(
         device,
         DateTime.UtcNow,
         device.LiveAccessEnabled ? sockets.GetConnectionState(deviceId) : null));
+});
+
+app.MapPost("/api/devices/{deviceId}/live/torch", async (
+    string deviceId,
+    LiveTorchRequest request,
+    DashcamDbContext db,
+    DeviceWebSocketHub sockets,
+    LiveTorchBroker liveTorch,
+    CancellationToken cancellationToken) =>
+{
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null) return Results.NotFound(new { error = "Device not found." });
+    if (!device.LiveRequested)
+        return Results.Conflict(new { error = "Start live viewing before controlling the flashlight." });
+    if (sockets.GetConnectionState(deviceId) != true)
+        return Results.Conflict(new { error = "The phone control connection is unavailable." });
+
+    try
+    {
+        var response = await liveTorch.RequestAsync(
+            deviceId,
+            request.Enabled,
+            (requestId, enabled, token) =>
+                sockets.SendTorchRequestAsync(deviceId, requestId, enabled, token),
+            cancellationToken);
+        if (!response.Available)
+            return Results.Conflict(new { error = response.Error ?? "This camera has no flashlight." });
+        if (!string.IsNullOrWhiteSpace(response.Error))
+            return Results.Conflict(new { error = response.Error });
+        return Results.Ok(new { response.Available, response.Enabled });
+    }
+    catch (TimeoutException)
+    {
+        return Results.Json(
+            new { error = "The phone did not confirm the flashlight request." },
+            statusCode: StatusCodes.Status504GatewayTimeout);
+    }
+    catch (InvalidOperationException error)
+    {
+        return Results.Conflict(new { error = error.Message });
+    }
 });
 
 app.MapPost("/api/devices/{deviceId}/live/frame", async (
@@ -2526,6 +2583,26 @@ static BatteryHistoryResponse? ParseBatteryHistoryResponse(string message)
     }
 }
 
+static LiveTorchResponse? ParseLiveTorchResponse(string message)
+{
+    try
+    {
+        using var document = JsonDocument.Parse(message);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("type", out var type) || type.GetString() != "torch_response")
+            return null;
+        var response = JsonSerializer.Deserialize<LiveTorchResponse>(message, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+        return response is { RequestId.Length: > 0 } ? response : null;
+    }
+    catch (JsonException)
+    {
+        return null;
+    }
+}
+
 static async Task<DeviceStatus> ApplyDeviceHeartbeatAsync(
     DeviceHeartbeatRequest request,
     string deviceId,
@@ -2696,3 +2773,4 @@ public sealed record DeviceHeartbeatRequest(
     bool LiveStreaming,
     string? LiveError);
 public sealed record LiveRequest(bool Enabled);
+public sealed record LiveTorchRequest(bool Enabled);

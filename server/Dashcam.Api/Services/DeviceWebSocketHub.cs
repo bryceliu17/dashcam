@@ -68,6 +68,16 @@ public sealed class DeviceWebSocketHub
         CancellationToken cancellationToken) =>
         SendJsonAsync(deviceId, new { type = "live_request", enabled }, cancellationToken);
 
+    public Task<bool> SendTorchRequestAsync(
+        string deviceId,
+        string requestId,
+        bool enabled,
+        CancellationToken cancellationToken) =>
+        SendJsonAsync(
+            deviceId,
+            new { type = "torch_request", requestId, enabled },
+            cancellationToken);
+
     public Task<bool> SendBatteryHistoryRequestAsync(
         string deviceId,
         string requestId,
