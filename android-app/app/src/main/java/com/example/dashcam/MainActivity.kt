@@ -64,6 +64,7 @@ import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
 import com.example.dashcam.recording.AudioRecordingService
+import com.example.dashcam.recording.AudioSegmentSettings
 import com.example.dashcam.recording.AudioStoragePolicy
 import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
@@ -100,7 +101,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var liveAccessButton: Button
     private lateinit var recordingModeSpinner: Spinner
     private lateinit var segmentDurationSpinner: Spinner
+    private lateinit var audioSegmentDurationSpinner: Spinner
     private var suppressSegmentDurationSelection = false
+    private var suppressAudioSegmentDurationSelection = false
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<VideoEntity>
@@ -521,6 +524,25 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        root.addView(TextView(this).apply {
+            text = "Audio Segment Length"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(14), 0, dp(5))
+        })
+        audioSegmentDurationSpinner = Spinner(this).apply {
+            setBackgroundColor(Color.WHITE)
+            configureAudioSegmentDurationSpinner(this)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (suppressAudioSegmentDurationSelection) return
+                    selectAudioSegmentDuration(position)
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             startManualUpload()
@@ -783,7 +805,7 @@ class MainActivity : ComponentActivity() {
             ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -1, 1f))
         audioTitleRow.addView(TextView(this).apply {
-            text = "Max per audio: 30 min"
+            text = "Max per audio: ${AudioSegmentSettings.displayLabel(this@MainActivity)}"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
             setSingleLine(true)
@@ -1618,6 +1640,15 @@ class MainActivity : ComponentActivity() {
                 segmentDurationSpinner.post { suppressSegmentDurationSelection = false }
             }
         }
+        if (::audioSegmentDurationSpinner.isInitialized) {
+            audioSegmentDurationSpinner.isEnabled = !liveStreaming && !audioRecordingActive
+            val position = audioSegmentDurationPosition(AudioSegmentSettings.durationMinutes(this))
+            if (audioSegmentDurationSpinner.selectedItemPosition != position) {
+                suppressAudioSegmentDurationSelection = true
+                audioSegmentDurationSpinner.setSelection(position, false)
+                audioSegmentDurationSpinner.post { suppressAudioSegmentDurationSelection = false }
+            }
+        }
     }
 
     private fun configureSegmentDurationSpinner(spinner: Spinner) {
@@ -1690,6 +1721,78 @@ class MainActivity : ComponentActivity() {
     private fun segmentDurationPosition(minutes: Int): Int {
         val preset = SEGMENT_DURATION_CHOICES.indexOfFirst { it.minutes == minutes }
         return if (preset >= 0) preset else CUSTOM_DURATION_POSITION
+    }
+
+    private fun configureAudioSegmentDurationSpinner(spinner: Spinner) {
+        suppressAudioSegmentDurationSelection = true
+        val minutes = AudioSegmentSettings.durationMinutes(this)
+        val labels = AUDIO_SEGMENT_DURATION_CHOICES.map { choice ->
+            if (choice.minutes == null && audioSegmentDurationPosition(minutes) == CUSTOM_AUDIO_DURATION_POSITION) {
+                "Custom ($minutes min)"
+            } else {
+                choice.label
+            }
+        }
+        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+        spinner.setSelection(audioSegmentDurationPosition(minutes), false)
+        spinner.post { suppressAudioSegmentDurationSelection = false }
+    }
+
+    private fun selectAudioSegmentDuration(position: Int) {
+        if (audioRecordingActive) {
+            configureAudioSegmentDurationSpinner(audioSegmentDurationSpinner)
+            toast("Stop audio recording before changing segment length")
+            return
+        }
+        val choice = AUDIO_SEGMENT_DURATION_CHOICES.getOrNull(position) ?: return
+        val minutes = choice.minutes
+        if (minutes == null) {
+            showCustomAudioSegmentDurationDialog()
+            return
+        }
+        if (minutes != AudioSegmentSettings.durationMinutes(this)) {
+            AudioSegmentSettings.setDurationMinutes(this, minutes)
+            toast("Audio segment length: ${AudioSegmentSettings.displayLabel(this)}")
+        }
+    }
+
+    private fun showCustomAudioSegmentDurationDialog() {
+        val current = AudioSegmentSettings.durationMinutes(this)
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            setText(if (current > 0) current.toString() else "30")
+            setSelection(text.length)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Custom audio segment length")
+            .setMessage("Enter whole minutes from 1 to ${AudioSegmentSettings.MAX_CUSTOM_DURATION_MINUTES}.")
+            .setView(input)
+            .setPositiveButton("Save", null)
+            .setNegativeButton("Cancel") { _, _ -> configureAudioSegmentDurationSpinner(audioSegmentDurationSpinner) }
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val minutes = input.text.toString().toIntOrNull()
+                if (minutes == null || minutes !in
+                    AudioSegmentSettings.MIN_CUSTOM_DURATION_MINUTES..AudioSegmentSettings.MAX_CUSTOM_DURATION_MINUTES
+                ) {
+                    input.error = "Enter 1-${AudioSegmentSettings.MAX_CUSTOM_DURATION_MINUTES} minutes"
+                    return@setOnClickListener
+                }
+                AudioSegmentSettings.setDurationMinutes(this, minutes)
+                configureAudioSegmentDurationSpinner(audioSegmentDurationSpinner)
+                toast("Audio segment length: ${AudioSegmentSettings.displayLabel(this)}")
+                dialog.dismiss()
+            }
+        }
+        dialog.setOnCancelListener { configureAudioSegmentDurationSpinner(audioSegmentDurationSpinner) }
+        dialog.show()
+    }
+
+    private fun audioSegmentDurationPosition(minutes: Int): Int {
+        val preset = AUDIO_SEGMENT_DURATION_CHOICES.indexOfFirst { it.minutes == minutes }
+        return if (preset >= 0) preset else CUSTOM_AUDIO_DURATION_POSITION
     }
 
     private fun currentRecordingMode(): RecordingMode = when {
@@ -2396,6 +2499,16 @@ class MainActivity : ComponentActivity() {
             SegmentDurationChoice("Custom...", null)
         )
         private const val CUSTOM_DURATION_POSITION = 5
+        private val AUDIO_SEGMENT_DURATION_CHOICES = listOf(
+            SegmentDurationChoice("5 minutes", 5),
+            SegmentDurationChoice("10 minutes", 10),
+            SegmentDurationChoice("15 minutes", 15),
+            SegmentDurationChoice("30 minutes", 30),
+            SegmentDurationChoice("60 minutes", 60),
+            SegmentDurationChoice("Unlimited", AudioSegmentSettings.UNLIMITED_DURATION_MINUTES),
+            SegmentDurationChoice("Custom...", null)
+        )
+        private const val CUSTOM_AUDIO_DURATION_POSITION = 6
     }
 
     private data class SegmentDurationChoice(val label: String, val minutes: Int?)

@@ -124,7 +124,8 @@ class AudioRecordingService : Service() {
             updateNotification("Recording ${destination.name}")
             broadcastState(true, 0, destination.name)
             mainHandler.removeCallbacks(rotateRunnable)
-            mainHandler.postDelayed(rotateRunnable, SEGMENT_DURATION_MS)
+            AudioSegmentSettings.durationMilliseconds(this)
+                ?.let { mainHandler.postDelayed(rotateRunnable, it) }
             mainHandler.removeCallbacks(statusRunnable)
             mainHandler.post(statusRunnable)
         } catch (error: Exception) {
@@ -337,6 +338,5 @@ class AudioRecordingService : Service() {
         private const val AUDIO_BIT_RATE = 128_000
         private const val AUDIO_SAMPLE_RATE = 44_100
         private const val STATUS_INTERVAL_MS = 1_000L
-        private const val SEGMENT_DURATION_MS = 30 * 60 * 1000L
     }
 }
