@@ -37,6 +37,7 @@ const val MAX_VIDEO_BYTES = 11L * 1024 * 1024 * 1024 / 2
 
 - Never copy the 25 GiB `main` limit into Android 5.
 - Preserve the legacy `android.hardware.Camera` background-recording path for API 21 and 22.
+- Preserve the API 21/22 legacy-camera path in `LiveAccessService`, including live-frame capture and flashlight control through `Camera.Parameters.FLASH_MODE_TORCH`. Do not copy Camera2 `CaptureRequest` torch code into that path.
 - Preserve the Android 5 camera-release delay, version-gated notifications, `PendingIntent` flags, `stopForeground` calls, and service lookup fallbacks.
 - Do not introduce unguarded APIs above API 21.
 - Keep `SimpleDateFormat` UTC serialization instead of `java.time.Instant` on the Android 5 path.
@@ -58,6 +59,7 @@ const val MAX_VIDEO_BYTES = 25L * 1024 * 1024 * 1024
 - Do not copy the Android 5 5.5 GiB limit into `main`.
 - Do not downgrade CameraX, AndroidX, Lifecycle, or WorkManager.
 - Do not copy legacy Camera API branches, old API fallbacks, artificial release delays, or Android 5-specific networking workarounds unless the same behavior is independently required on modern Android.
+- Keep `main` live camera and flashlight control on Camera2 (`CameraDevice`/`CameraCaptureSession` and `CaptureRequest.FLASH_MODE_TORCH`); do not replace it with the Android 5 legacy Camera implementation.
 - Keep the maintained server, dashboard, and deployment implementation on `main`; do not replace it with files from Android 5.
 
 ## Validation
