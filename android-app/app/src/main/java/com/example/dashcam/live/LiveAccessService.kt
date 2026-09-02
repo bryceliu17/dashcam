@@ -28,6 +28,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.Surface
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.dashcam.MainActivity
@@ -68,6 +69,8 @@ class LiveAccessService : Service() {
     private var imageReader: ImageReader? = null
     private var legacyCamera: Camera? = null
     private var legacySurfaceTexture: SurfaceTexture? = null
+    private var camera2SurfaceTexture: SurfaceTexture? = null
+    private var camera2Surface: Surface? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var liveClientUrl = ""
@@ -84,6 +87,8 @@ class LiveAccessService : Service() {
     @Volatile private var liveRequested = false
     @Volatile private var cameraStarting = false
     @Volatile private var streaming = false
+    @Volatile private var torchEnabled = false
+    @Volatile private var activeCameraHasFlash = false
     private var lastLegacyFrameAt = 0L
 
     private val captureRunnable = object : Runnable {
@@ -101,6 +106,12 @@ class LiveAccessService : Service() {
                     addTarget(reader.surface)
                     set(CaptureRequest.JPEG_QUALITY, 65.toByte())
                     set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    set(
+                        CaptureRequest.FLASH_MODE,
+                        if (torchEnabled && activeCameraHasFlash) CaptureRequest.FLASH_MODE_TORCH
+                        else CaptureRequest.FLASH_MODE_OFF
+                    )
                 }.build()
                 session.capture(request, null, cameraHandler)
             } catch (error: Exception) {
@@ -210,7 +221,7 @@ class LiveAccessService : Service() {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val message = try { JSONObject(text) } catch (_: Exception) { return }
-                scope.launch { handleControlMessage(message) }
+                handleControlMessage(message)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -281,6 +292,10 @@ class LiveAccessService : Service() {
     private fun handleControlMessage(message: JSONObject) {
         when (message.optString("type")) {
             "live_request" -> applyLiveRequest(message.optBoolean("enabled", false))
+            "torch_request" -> applyTorchRequest(
+                message.optString("requestId"),
+                message.optBoolean("enabled", false)
+            )
             "battery_history_request" -> {
                 val requestId = message.optString("requestId")
                 if (requestId.isNotBlank()) scope.launch {
@@ -302,6 +317,8 @@ class LiveAccessService : Service() {
         }
         cameraStarting = true
         streaming = true
+        torchEnabled = false
+        activeCameraHasFlash = false
         LiveAccessSettings.setStreaming(this, true)
         setError(null)
         broadcastState()
@@ -321,6 +338,7 @@ class LiveAccessService : Service() {
                     return@cameraStart
                 }
                 val characteristics = manager.getCameraCharacteristics(cameraId)
+                activeCameraHasFlash = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
                 val sizes = characteristics
                     .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     ?.getOutputSizes(ImageFormat.JPEG)
@@ -336,6 +354,9 @@ class LiveAccessService : Service() {
                 imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2).apply {
                     setOnImageAvailableListener({ reader -> handleImage(reader) }, cameraHandler)
                 }
+                val texture = SurfaceTexture(0).apply { setDefaultBufferSize(size.width, size.height) }
+                camera2SurfaceTexture = texture
+                camera2Surface = Surface(texture)
                 manager.openCamera(cameraId, cameraStateCallback, cameraHandler)
             } catch (error: Exception) {
                 stopStreaming("Unable to open live camera: ${error.message.orEmpty()}")
@@ -349,6 +370,7 @@ class LiveAccessService : Service() {
         val camera = Camera.open(cameraId)
         legacyCamera = camera
         val parameters = camera.parameters
+        activeCameraHasFlash = parameters.supportedFlashModes?.contains(Camera.Parameters.FLASH_MODE_TORCH) == true
         val size = parameters.supportedPreviewSizes
             .filter { it.width <= 1280 && it.height <= 720 }
             .maxByOrNull { it.width * it.height }
@@ -437,9 +459,10 @@ class LiveAccessService : Service() {
         override fun onOpened(camera: CameraDevice) {
             cameraDevice = camera
             val surface = imageReader?.surface ?: return stopStreaming("Live frame surface unavailable")
+            val repeatingSurface = camera2Surface ?: return stopStreaming("Live preview surface unavailable")
             try {
                 camera.createCaptureSession(
-                    listOf(surface),
+                    listOf(surface, repeatingSurface),
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
                             if (!cameraStarting) {
@@ -447,6 +470,13 @@ class LiveAccessService : Service() {
                                 return
                             }
                             captureSession = session
+                            try {
+                                updateCamera2RepeatingRequest()
+                            } catch (error: Exception) {
+                                session.close()
+                                stopStreaming("Unable to start live preview: ${error.message.orEmpty()}")
+                                return
+                            }
                             cameraStarting = false
                             streaming = true
                             LiveAccessSettings.setStreaming(this@LiveAccessService, true)
@@ -479,6 +509,83 @@ class LiveAccessService : Service() {
         }
     }
 
+    private fun applyTorchRequest(requestId: String, enabled: Boolean, attemptsRemaining: Int = 24) {
+        if (requestId.isBlank()) return
+        cameraHandler.post {
+            val ready = !cameraStarting && (legacyCamera != null || (captureSession != null && cameraDevice != null))
+            if (!streaming || !ready) {
+                if (liveRequested && cameraStarting && attemptsRemaining > 0) {
+                    cameraHandler.postDelayed(
+                        { applyTorchRequest(requestId, enabled, attemptsRemaining - 1) },
+                        TORCH_READY_RETRY_MS
+                    )
+                    return@post
+                }
+                sendTorchResponse(requestId, false, false, "Live camera is not ready")
+                return@post
+            }
+            if (!activeCameraHasFlash) {
+                torchEnabled = false
+                sendTorchResponse(requestId, false, false, "This camera has no controllable flashlight")
+                return@post
+            }
+            val previous = torchEnabled
+            torchEnabled = enabled
+            try {
+                if (legacyCamera != null) updateLegacyTorch() else updateCamera2RepeatingRequest()
+                sendTorchResponse(requestId, true, torchEnabled, null)
+            } catch (error: Exception) {
+                torchEnabled = previous
+                try {
+                    if (legacyCamera != null) updateLegacyTorch() else updateCamera2RepeatingRequest()
+                } catch (_: Exception) {
+                }
+                sendTorchResponse(requestId, true, previous, error.message ?: "Unable to control flashlight")
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun updateLegacyTorch() {
+        val camera = legacyCamera ?: throw IllegalStateException("Live camera is not ready")
+        val parameters = camera.parameters
+        val mode = if (torchEnabled) Camera.Parameters.FLASH_MODE_TORCH else Camera.Parameters.FLASH_MODE_OFF
+        if (parameters.supportedFlashModes?.contains(mode) != true) {
+            throw IllegalStateException("This camera cannot use the requested flashlight mode")
+        }
+        parameters.flashMode = mode
+        camera.parameters = parameters
+    }
+
+    private fun updateCamera2RepeatingRequest() {
+        val device = cameraDevice ?: throw IllegalStateException("Live camera is not ready")
+        val session = captureSession ?: throw IllegalStateException("Live camera session is not ready")
+        val surface = camera2Surface ?: throw IllegalStateException("Live preview surface is unavailable")
+        val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(surface)
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            set(
+                CaptureRequest.FLASH_MODE,
+                if (torchEnabled && activeCameraHasFlash) CaptureRequest.FLASH_MODE_TORCH
+                else CaptureRequest.FLASH_MODE_OFF
+            )
+        }.build()
+        session.setRepeatingRequest(request, null, cameraHandler)
+    }
+
+    private fun sendTorchResponse(requestId: String, available: Boolean, enabled: Boolean, error: String?) {
+        controlSocket?.send(
+            JSONObject()
+                .put("type", "torch_response")
+                .put("requestId", requestId)
+                .put("available", available)
+                .put("enabled", enabled)
+                .put("error", error ?: JSONObject.NULL)
+                .toString()
+        )
+    }
+
     private fun handleImage(reader: ImageReader) {
         val image = reader.acquireLatestImage() ?: return
         val bytes = try {
@@ -502,12 +609,14 @@ class LiveAccessService : Service() {
     private fun stopStreaming(error: String? = null) {
         cameraStarting = false
         streaming = false
+        torchEnabled = false
         LiveAccessSettings.setStreaming(this, false)
         LiveAccessSettings.setError(this, error)
         if (::cameraHandler.isInitialized) {
             cameraHandler.removeCallbacks(captureRunnable)
             cameraHandler.post {
                 try {
+                    if (legacyCamera != null && activeCameraHasFlash) updateLegacyTorch()
                     legacyCamera?.setPreviewCallbackWithBuffer(null)
                     legacyCamera?.stopPreview()
                 } catch (_: Exception) {
@@ -516,12 +625,22 @@ class LiveAccessService : Service() {
                 legacyCamera = null
                 legacySurfaceTexture?.release()
                 legacySurfaceTexture = null
+                try {
+                    if (captureSession != null && cameraDevice != null) updateCamera2RepeatingRequest()
+                    captureSession?.stopRepeating()
+                } catch (_: Exception) {
+                }
                 captureSession?.close()
                 captureSession = null
                 cameraDevice?.close()
                 cameraDevice = null
                 imageReader?.close()
                 imageReader = null
+                camera2Surface?.release()
+                camera2Surface = null
+                camera2SurfaceTexture?.release()
+                camera2SurfaceTexture = null
+                activeCameraHasFlash = false
             }
         }
         releaseStreamingLocks()
@@ -662,6 +781,7 @@ class LiveAccessService : Service() {
         private const val NOTIFICATION_ID = 2004
         private const val SAFETY_INTERVAL_MS = 15_000L
         private const val FRAME_INTERVAL_MS = 125L
+        private const val TORCH_READY_RETRY_MS = 250L
         private const val LEGACY_JPEG_QUALITY = 60
         private const val CAMERA_RELEASE_DELAY_MS = 300L
         private const val TAG = "LiveAccessService"
