@@ -2003,6 +2003,19 @@ export default function App() {
     }
   }
 
+  const deleteAudioTranscript = async recording => {
+    if (!window.confirm('Delete this generated transcript? The audio recording will be kept.')) return
+    setError('')
+    setSelectedTranscript(current => current ? { ...current, deleting: true, error: '' } : current)
+    try {
+      const result = await api(`/api/audio/${recording.id}/transcription`, { method: 'DELETE' })
+      updateTranscriptSummary(result)
+      setSelectedTranscript(null)
+    } catch (err) {
+      setSelectedTranscript(current => current ? { ...current, deleting: false, error: err.message } : current)
+    }
+  }
+
   const toggleSelection = (setIds, id) => setIds(current => {
     const next = new Set(current)
     if (next.has(id)) next.delete(id)
@@ -2505,8 +2518,8 @@ export default function App() {
       <AudioSessionPlayback key={selectedAudioSession.number} session={selectedAudioSession} />
       <p>{formatDate(selectedAudioSession.recordings[0].startTime)} to {formatDate(selectedAudioSession.recordings.at(-1).endTime)} | {formatTotalDuration(selectedAudioSession.durationSeconds)} including short silent intervals</p>
     </div></div>}
-    {selectedTranscript && <div className="modal" onMouseDown={() => setSelectedTranscript(null)}><div className="player transcript-modal" onMouseDown={event => event.stopPropagation()}>
-      <div><strong>{selectedTranscript.recording.originalFilename || selectedTranscript.recording.filename}</strong><span className="player-actions">{selectedTranscript.status === 'ready' && <a className="transcript-download" href={`${API}/api/audio/${selectedTranscript.recording.id}/transcription/download`}><Icon name="download" />Download TXT</a>}<button className="close-player" aria-label="Close transcript" onClick={() => setSelectedTranscript(null)}>X</button></span></div>
+    {selectedTranscript && <div className="modal" onMouseDown={() => !selectedTranscript.deleting && setSelectedTranscript(null)}><div className="player transcript-modal" onMouseDown={event => event.stopPropagation()}>
+      <div><strong>{selectedTranscript.recording.originalFilename || selectedTranscript.recording.filename}</strong><span className="player-actions">{selectedTranscript.status === 'ready' && <><a className="transcript-download" href={`${API}/api/audio/${selectedTranscript.recording.id}/transcription/download`}><Icon name="download" />Download TXT</a><button type="button" className="transcript-delete" disabled={selectedTranscript.deleting} onClick={() => deleteAudioTranscript(selectedTranscript.recording)}><Icon name="trash" />{selectedTranscript.deleting ? 'Deleting…' : 'Delete transcript'}</button></>}<button className="close-player" aria-label="Close transcript" disabled={selectedTranscript.deleting} onClick={() => setSelectedTranscript(null)}>X</button></span></div>
       {selectedTranscript.loading ? <div className="transcript-loading"><div className="spinner" /><span>Loading transcript…</span></div> : selectedTranscript.error ? <div className="transcript-error">{selectedTranscript.error}</div> : <div className="transcript-body">
         <div className="transcript-meta"><span>Language <strong>{selectedTranscript.language || 'Unknown'}{selectedTranscript.languageProbability ? ` · ${Math.round(selectedTranscript.languageProbability * 100)}%` : ''}</strong></span><span>Model <strong>{selectedTranscript.model || '—'}</strong></span></div>
         <pre>{selectedTranscript.text || 'No speech was detected in this recording.'}</pre>

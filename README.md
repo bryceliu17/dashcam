@@ -84,7 +84,7 @@ The volume-key modes require **Dashcam Volume Up Double-Press** to be enabled in
 - Group nearby recordings into sessions for continuous video or audio playback while retaining individual controls.
 - Bulk select, lock/unlock, rotate videos, and delete recordings.
 - Audio waveform generation and caching through `ffmpeg`.
-- One-click transcription for audio recordings up to 30 minutes, with language detection, transcript viewing, and TXT download. Docker runs a `faster-whisper` transcription worker configured for CUDA by default.
+- One-click transcription for audio recordings up to 30 minutes, with language detection, transcript viewing, TXT download, and transcript deletion without deleting the audio. Docker runs a `faster-whisper` transcription worker configured for CUDA by default.
 - Device list with online transport, battery/charging state, Live Access state, and battery-temperature history.
 - Dashboard storage settings for separate video/audio server limits. It offers a recommendation equal to 76% of the storage drive, preserving the current video/audio split.
 - Browser-assisted archive migration: select a previous archive folder containing `dashcam.db` plus `videos` and/or `audio`, upload it to the current server, and merge it through the migration workflow.
@@ -314,7 +314,7 @@ React 管理页面（Docker 默认端口 8080）
 - 将相邻录制分组为 session 连续播放，同时保留单个文件控制。
 - 支持多选、批量锁定/解锁、批量旋转视频和批量删除。
 - 使用 `ffmpeg` 生成和缓存音频波形。
-- 最长 30 分钟的音频可以一键转文字，支持语言识别、查看文字稿和下载 TXT。Docker 默认运行使用 CUDA 的 `faster-whisper` 转写服务。
+- 最长 30 分钟的音频可以一键转文字，支持语言识别、查看文字稿、下载 TXT 和单独删除文字稿而不删除音频。Docker 默认运行使用 CUDA 的 `faster-whisper` 转写服务。
 - 设备列表显示在线连接方式、电量/充电状态、Live Access 状态和电池温度历史。
 - 网页可分别设置服务端视频/音频容量，并根据所在存储盘给出 76% 的推荐总容量，保持当前视频/音频比例。
 - 支持浏览器辅助归档迁移：选择旧归档文件夹（包含 `dashcam.db` 和 `videos`、`audio`），上传到当前服务端并通过迁移流程合并。

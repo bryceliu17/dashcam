@@ -851,6 +851,29 @@ app.MapGet("/api/audio/{id:int}/transcription/download", async (
     return Results.File(bytes, "text/plain; charset=utf-8", filename);
 });
 
+app.MapDelete("/api/audio/{id:int}/transcription", async (
+    int id, DashcamDbContext db, CancellationToken token) =>
+{
+    var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == id, token);
+    if (audio is null) return Results.NotFound();
+    if (audio.TranscriptStatus is "queued" or "processing")
+        return Results.Conflict(new { error = "Wait for transcription to finish before deleting it." });
+    if (audio.TranscriptStatus != "ready")
+        return Results.Conflict(new { error = "There is no generated transcript to delete." });
+
+    audio.TranscriptStatus = "none";
+    audio.TranscriptText = string.Empty;
+    audio.TranscriptLanguage = string.Empty;
+    audio.TranscriptLanguageProbability = 0;
+    audio.TranscriptModel = string.Empty;
+    audio.TranscriptSegmentsJson = string.Empty;
+    audio.TranscriptError = string.Empty;
+    audio.TranscriptCreatedAt = null;
+    await db.SaveChangesAsync(token);
+
+    return Results.Ok(ToTranscriptResponse(audio, includeText: false));
+});
+
 app.MapDelete("/api/audio/{id:int}", async (int id, DashcamDbContext db, CancellationToken token) =>
 {
     var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == id, token);
