@@ -199,7 +199,8 @@ class BackgroundRecordingService : Service() {
                     mainHandler.removeCallbacks(statusRunnable)
                     mainHandler.post(statusRunnable)
                     mainHandler.removeCallbacks(rotateRunnable)
-                    mainHandler.postDelayed(rotateRunnable, SEGMENT_DURATION_MS)
+                    VideoSegmentSettings.durationMilliseconds(this@BackgroundRecordingService)
+                        ?.let { mainHandler.postDelayed(rotateRunnable, it) }
                 } catch (error: Exception) {
                     failAndStop("Unable to start background recording: ${error.message.orEmpty()}")
                 }
@@ -242,7 +243,8 @@ class BackgroundRecordingService : Service() {
                             mainHandler.removeCallbacks(statusRunnable)
                             mainHandler.post(statusRunnable)
                             mainHandler.removeCallbacks(rotateRunnable)
-                            mainHandler.postDelayed(rotateRunnable, SEGMENT_DURATION_MS)
+                            VideoSegmentSettings.durationMilliseconds(this@BackgroundRecordingService)
+                                ?.let { mainHandler.postDelayed(rotateRunnable, it) }
                         }
 
                         override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -436,6 +438,10 @@ class BackgroundRecordingService : Service() {
             finishService()
             return
         }
+        if (VideoSegmentSettings.durationMilliseconds(this) == null) {
+            stopRecordingAndSaveCurrentSegment()
+            return
+        }
         stopAfterCurrentSegmentRequested = true
         updateNotification("Stopping after current segment")
         broadcastState(true, currentElapsedSeconds(), currentFile?.name)
@@ -558,7 +564,6 @@ class BackgroundRecordingService : Service() {
         const val EXTRA_MESSAGE = "message"
         private const val CHANNEL_ID = "dashcam_background_recording"
         private const val NOTIFICATION_ID = 2001
-        private const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
         private const val TAG = "BackgroundRecordingService"
     }
 
