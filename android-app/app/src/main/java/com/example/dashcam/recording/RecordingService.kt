@@ -247,10 +247,11 @@ class RecordingService : LifecycleService() {
     }
 
     private fun scheduleSegmentRotation() {
+        val durationMs = VideoSegmentSettings.durationMilliseconds(this) ?: return
         ContextCompat.getMainExecutor(this).execute {
             android.os.Handler(mainLooper).postDelayed({
                 if (continueRecording) recording?.stop()
-            }, SEGMENT_DURATION_MS)
+            }, durationMs)
         }
     }
 
@@ -311,7 +312,7 @@ class RecordingService : LifecycleService() {
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_dashcam)
         .setContentTitle("Dashcam recording")
-        .setContentText("Recording 5-minute video segments")
+        .setContentText("Video segments: ${VideoSegmentSettings.displayLabel(this)}")
         .setOngoing(true)
         .setContentIntent(PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -358,6 +359,5 @@ class RecordingService : LifecycleService() {
         @Volatile var previewSurfaceProvider: Preview.SurfaceProvider? = null
         private const val CHANNEL_ID = "dashcam_recording"
         private const val NOTIFICATION_ID = 1001
-        private const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
     }
 }

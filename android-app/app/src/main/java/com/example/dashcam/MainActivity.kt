@@ -71,6 +71,7 @@ import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.StoragePolicy
+import com.example.dashcam.recording.VideoSegmentSettings
 import com.example.dashcam.recording.VolumeKeyAccessibilityService
 import com.example.dashcam.upload.UploadWorker
 import com.example.dashcam.battery.BatteryTemperatureChartView
@@ -100,6 +101,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var audioRecordButton: Button
     private lateinit var liveAccessButton: Button
     private lateinit var recordingModeSpinner: Spinner
+    private lateinit var segmentDurationSpinner: Spinner
+    private var suppressSegmentDurationSelection = false
     private lateinit var previewView: PreviewView
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<VideoEntity>
@@ -504,6 +507,25 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(recordingModeSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        root.addView(TextView(this).apply {
+            text = "Video Segment Length"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(14), 0, dp(5))
+        })
+        segmentDurationSpinner = Spinner(this).apply {
+            setBackgroundColor(Color.WHITE)
+            configureSegmentDurationSpinner(this)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (suppressSegmentDurationSelection) return
+                    selectSegmentDuration(position)
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             startManualUpload()
@@ -649,7 +671,7 @@ class MainActivity : ComponentActivity() {
             ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -1, 1f))
         videoTitleRow.addView(TextView(this).apply {
-            text = "Max per video: 5 min"
+            text = "Max per video: ${VideoSegmentSettings.displayLabel(this@MainActivity)}"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
             setSingleLine(true)
@@ -1474,9 +1496,14 @@ class MainActivity : ComponentActivity() {
 
     private fun requestStopAfterCurrentSegment() {
         var handled = false
+        val unlimitedSegment = VideoSegmentSettings.durationMilliseconds(this) == null
         if (recording != null || continueRecording) {
-            stopAfterCurrentSegment = true
-            updateRecordingStatus()
+            if (unlimitedSegment) {
+                stopDashcam("Power disconnected")
+            } else {
+                stopAfterCurrentSegment = true
+                updateRecordingStatus()
+            }
             handled = true
         }
         if (backgroundRecordingActive) {
@@ -1486,7 +1513,12 @@ class MainActivity : ComponentActivity() {
             )
             handled = true
         }
-        if (handled) toast("Power disconnected; stopping after current segment")
+        if (handled) {
+            toast(
+                if (unlimitedSegment) "Power disconnected; stopping and saving current video"
+                else "Power disconnected; stopping after current segment"
+            )
+        }
     }
 
     private fun setRecordingMode(mode: RecordingMode) {
@@ -1556,6 +1588,88 @@ class MainActivity : ComponentActivity() {
                 recordingModeSpinner.setSelection(position, false)
             }
         }
+        if (::segmentDurationSpinner.isInitialized) {
+            segmentDurationSpinner.isEnabled =
+                !liveStreaming && recording == null && !continueRecording && !backgroundRecordingActive
+            val position = segmentDurationPosition(VideoSegmentSettings.durationMinutes(this))
+            if (segmentDurationSpinner.selectedItemPosition != position) {
+                suppressSegmentDurationSelection = true
+                segmentDurationSpinner.setSelection(position, false)
+                segmentDurationSpinner.post { suppressSegmentDurationSelection = false }
+            }
+        }
+    }
+
+    private fun configureSegmentDurationSpinner(spinner: Spinner) {
+        suppressSegmentDurationSelection = true
+        val minutes = VideoSegmentSettings.durationMinutes(this)
+        val labels = SEGMENT_DURATION_CHOICES.map { choice ->
+            if (choice.minutes == null && segmentDurationPosition(minutes) == CUSTOM_DURATION_POSITION) {
+                "Custom ($minutes min)"
+            } else {
+                choice.label
+            }
+        }
+        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+        spinner.setSelection(segmentDurationPosition(minutes), false)
+        spinner.post { suppressSegmentDurationSelection = false }
+    }
+
+    private fun selectSegmentDuration(position: Int) {
+        if (recording != null || continueRecording || backgroundRecordingActive) {
+            configureSegmentDurationSpinner(segmentDurationSpinner)
+            toast("Stop video recording before changing segment length")
+            return
+        }
+        val choice = SEGMENT_DURATION_CHOICES.getOrNull(position) ?: return
+        val minutes = choice.minutes
+        if (minutes == null) {
+            showCustomSegmentDurationDialog()
+            return
+        }
+        if (minutes != VideoSegmentSettings.durationMinutes(this)) {
+            VideoSegmentSettings.setDurationMinutes(this, minutes)
+            toast("Video segment length: ${VideoSegmentSettings.displayLabel(this)}")
+        }
+    }
+
+    private fun showCustomSegmentDurationDialog() {
+        val current = VideoSegmentSettings.durationMinutes(this)
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            setText(if (current > 0) current.toString() else "15")
+            setSelection(text.length)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Custom video segment length")
+            .setMessage("Enter whole minutes from 1 to ${VideoSegmentSettings.MAX_CUSTOM_DURATION_MINUTES}.")
+            .setView(input)
+            .setPositiveButton("Save", null)
+            .setNegativeButton("Cancel") { _, _ -> configureSegmentDurationSpinner(segmentDurationSpinner) }
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val minutes = input.text.toString().toIntOrNull()
+                if (minutes == null || minutes !in
+                    VideoSegmentSettings.MIN_CUSTOM_DURATION_MINUTES..VideoSegmentSettings.MAX_CUSTOM_DURATION_MINUTES
+                ) {
+                    input.error = "Enter 1-${VideoSegmentSettings.MAX_CUSTOM_DURATION_MINUTES} minutes"
+                    return@setOnClickListener
+                }
+                VideoSegmentSettings.setDurationMinutes(this, minutes)
+                configureSegmentDurationSpinner(segmentDurationSpinner)
+                toast("Video segment length: ${VideoSegmentSettings.displayLabel(this)}")
+                dialog.dismiss()
+            }
+        }
+        dialog.setOnCancelListener { configureSegmentDurationSpinner(segmentDurationSpinner) }
+        dialog.show()
+    }
+
+    private fun segmentDurationPosition(minutes: Int): Int {
+        val preset = SEGMENT_DURATION_CHOICES.indexOfFirst { it.minutes == minutes }
+        return if (preset >= 0) preset else CUSTOM_DURATION_POSITION
     }
 
     private fun currentRecordingMode(): RecordingMode = when {
@@ -1885,9 +1999,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun scheduleSegmentRotation() {
+        val durationMs = VideoSegmentSettings.durationMilliseconds(this) ?: return
         mainHandler.postDelayed({
             if (continueRecording) recording?.stop()
-        }, SEGMENT_DURATION_MS)
+        }, durationMs)
     }
 
     private fun afterSegmentFinalized() {
@@ -2246,8 +2361,18 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
+        private val SEGMENT_DURATION_CHOICES = listOf(
+            SegmentDurationChoice("1 minute", 1),
+            SegmentDurationChoice("3 minutes", 3),
+            SegmentDurationChoice("5 minutes", 5),
+            SegmentDurationChoice("10 minutes", 10),
+            SegmentDurationChoice("Unlimited", VideoSegmentSettings.UNLIMITED_DURATION_MINUTES),
+            SegmentDurationChoice("Custom...", null)
+        )
+        private const val CUSTOM_DURATION_POSITION = 5
     }
+
+    private data class SegmentDurationChoice(val label: String, val minutes: Int?)
 
     private enum class RecordingMode(val label: String) {
         Frontend("Frontend Recording"),
