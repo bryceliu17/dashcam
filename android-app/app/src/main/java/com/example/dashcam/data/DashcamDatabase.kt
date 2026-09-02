@@ -1,6 +1,7 @@
 package com.example.dashcam.data
 
 import android.content.Context
+import android.os.Build
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -8,6 +9,7 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.dashcam.battery.BatteryElectricalUnits
 
 class Converters {
     @TypeConverter fun fromStatus(value: UploadStatus) = value.name
@@ -16,7 +18,7 @@ class Converters {
 
 @Database(
     entities = [VideoEntity::class, AudioEntity::class, BatteryTemperatureSample::class],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -30,7 +32,13 @@ abstract class DashcamDatabase : RoomDatabase() {
         fun get(context: Context): DashcamDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext, DashcamDatabase::class.java, "dashcam.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { instance = it }
+            ).addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6
+            ).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -93,6 +101,24 @@ abstract class DashcamDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN currentNowMicroamps INTEGER")
                 db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN estimatedBatteryPowerMilliwatts INTEGER")
                 db.execSQL("ALTER TABLE battery_temperature_samples ADD COLUMN chargingSource TEXT NOT NULL DEFAULT 'Unknown'")
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                if (!BatteryElectricalUnits.usesMilliampCurrentReporting(Build.MANUFACTURER, Build.MODEL)) return
+                db.execSQL(
+                    """
+                    UPDATE battery_temperature_samples
+                    SET estimatedBatteryPowerMilliwatts = CASE
+                            WHEN voltageMillivolts IS NULL THEN NULL
+                            ELSE currentNowMicroamps * voltageMillivolts / 1000
+                        END,
+                        currentNowMicroamps = currentNowMicroamps * 1000
+                    WHERE currentNowMicroamps IS NOT NULL
+                      AND ABS(currentNowMicroamps) <= 20000
+                    """.trimIndent()
+                )
             }
         }
     }

@@ -3,6 +3,7 @@ package com.example.dashcam.battery
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.BatteryManager
 import android.util.Log
 import com.example.dashcam.data.BatteryTemperatureSample
@@ -49,9 +50,12 @@ object BatteryTemperatureMonitor {
         val voltageMillivolts = battery.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
             .takeIf { it in 2_000..6_000 }
         val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-        val currentNowMicroamps = batteryManager
+        val reportedCurrentNow = batteryManager
             ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
             ?.takeIf { it != 0 && it != Int.MIN_VALUE && kotlin.math.abs(it.toLong()) <= 20_000_000L }
+        val currentNowMicroamps = reportedCurrentNow?.let {
+            BatteryElectricalUnits.currentNowMicroamps(Build.MANUFACTURER, Build.MODEL, it)
+        }
         val estimatedPowerMilliwatts = if (currentNowMicroamps != null && voltageMillivolts != null) {
             (currentNowMicroamps.toLong() * voltageMillivolts / 1_000_000L)
                 .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
