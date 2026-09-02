@@ -18,6 +18,9 @@ public sealed class AudioRecording
     public string TranscriptModel { get; set; } = string.Empty;
     public string TranscriptSegmentsJson { get; set; } = string.Empty;
     public string TranscriptError { get; set; } = string.Empty;
+    public string TranscriptDiarizationStatus { get; set; } = "none";
+    public string TranscriptDiarizationError { get; set; } = string.Empty;
+    public int TranscriptSpeakerCount { get; set; }
     public DateTime? TranscriptCreatedAt { get; set; }
     public DateTime UploadedAt { get; set; }
     public DateTime CreatedAt { get; set; }

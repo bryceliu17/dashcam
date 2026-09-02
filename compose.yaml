@@ -35,6 +35,9 @@ services:
       WHISPER_DEVICE: cuda
       WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_CACHE: /models
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+      PYANNOTE_MODEL: ${PYANNOTE_MODEL:-pyannote/speaker-diarization-community-1}
+      PYANNOTE_DEVICE: ${PYANNOTE_DEVICE:-cuda}
     volumes:
       - type: bind
         source: ${DASHCAM_DATA_PATH:-./data}

@@ -84,7 +84,7 @@ The volume-key modes require **Dashcam Volume Up Double-Press** to be enabled in
 - Group nearby recordings into sessions for continuous video or audio playback while retaining individual controls.
 - Bulk select, lock/unlock, rotate videos, and delete recordings.
 - Audio waveform generation and caching through `ffmpeg`.
-- One-click transcription for audio recordings up to 30 minutes, with language detection, transcript viewing, TXT download, and transcript deletion without deleting the audio. Docker runs a `faster-whisper` transcription worker configured for CUDA by default.
+- One-click transcription for audio recordings up to 30 minutes, with language detection, timestamped `Speaker 1` / `Speaker 2` separation, transcript viewing, TXT download, and transcript deletion without deleting the audio. Docker runs `faster-whisper` plus optional local `pyannote.audio` speaker diarization, configured for CUDA by default.
 - Device list with online transport, battery/charging state, Live Access state, and battery-temperature history.
 - Dashboard storage settings for separate video/audio server limits. It offers a recommendation equal to 76% of the storage drive, preserving the current video/audio split.
 - Browser-assisted archive migration: select a previous archive folder containing `dashcam.db` plus `videos` and/or `audio`, upload it to the current server, and merge it through the migration workflow.
@@ -125,9 +125,10 @@ Copy `.env.example` to `.env` to choose a host folder or initial server limits:
 DASHCAM_DATA_PATH=./data
 DASHCAM_MAX_STORAGE_GB=350
 DASHCAM_MAX_AUDIO_STORAGE_GB=20
+HUGGINGFACE_TOKEN=
 ```
 
-The dashboard can later save different server limits; those saved values take precedence over these initial fallbacks. `.env` is ignored by Git.
+The dashboard can later save different server limits; those saved values take precedence over these initial fallbacks. `.env` is ignored by Git. Speaker separation requires accepting the `pyannote/speaker-diarization-community-1` terms on Hugging Face and adding a read token as `HUGGINGFACE_TOKEN`; without it, normal transcription still works and is marked as not separated. Speaker numbers identify voices within one recording and do not identify people by name.
 
 Useful commands:
 
@@ -230,7 +231,7 @@ Switch back with `git switch main` before building or deploying the maintained s
 - Background camera, charging detection, Wi-Fi behavior, and key events vary by phone manufacturer, firmware, lock-screen state, heat, and battery policy.
 - Video bitrate, frame rate, low-light behavior, and resulting file size depend on each device camera/encoder.
 - Live Access is intended for on-demand viewing, not as a security-camera replacement.
-- The project does not currently include GPS, collision detection, cloud storage, multi-user accounts, speaker diarization, or automated Android integration tests.
+- The project does not currently include GPS, collision detection, cloud storage, multi-user accounts, named speaker recognition, or automated Android integration tests.
 
 ---
 
@@ -314,7 +315,7 @@ React 管理页面（Docker 默认端口 8080）
 - 将相邻录制分组为 session 连续播放，同时保留单个文件控制。
 - 支持多选、批量锁定/解锁、批量旋转视频和批量删除。
 - 使用 `ffmpeg` 生成和缓存音频波形。
-- 最长 30 分钟的音频可以一键转文字，支持语言识别、查看文字稿、下载 TXT 和单独删除文字稿而不删除音频。Docker 默认运行使用 CUDA 的 `faster-whisper` 转写服务。
+- 最长 30 分钟的音频可以一键转文字，支持语言识别、带时间的 `Speaker 1` / `Speaker 2` 说话人分离、查看文字稿、下载 TXT 和单独删除文字稿而不删除音频。Docker 默认使用 CUDA 运行 `faster-whisper`，并可在本机使用 `pyannote.audio` 进行说话人分离。
 - 设备列表显示在线连接方式、电量/充电状态、Live Access 状态和电池温度历史。
 - 网页可分别设置服务端视频/音频容量，并根据所在存储盘给出 76% 的推荐总容量，保持当前视频/音频比例。
 - 支持浏览器辅助归档迁移：选择旧归档文件夹（包含 `dashcam.db` 和 `videos`、`audio`），上传到当前服务端并通过迁移流程合并。
@@ -355,9 +356,10 @@ data\archive-storage-settings.json
 DASHCAM_DATA_PATH=./data
 DASHCAM_MAX_STORAGE_GB=350
 DASHCAM_MAX_AUDIO_STORAGE_GB=20
+HUGGINGFACE_TOKEN=
 ```
 
-之后网页可保存不同的服务端容量；保存后的值会优先于这些初始默认值。`.env` 已被 Git 忽略。
+之后网页可保存不同的服务端容量；保存后的值会优先于这些初始默认值。`.env` 已被 Git 忽略。说话人分离需要先在 Hugging Face 接受 `pyannote/speaker-diarization-community-1` 的使用条款，再把只读 token 填入 `HUGGINGFACE_TOKEN`；没有 token 时普通转写仍可使用，网页会标记为未分离。说话人编号只区分同一段录音中的不同声音，不会自动识别真实姓名。
 
 常用命令：
 
@@ -460,4 +462,4 @@ cd android-app
 - 后台相机、充电检测、Wi-Fi、按键行为会受手机厂商、固件、锁屏、温度和省电策略影响。
 - 视频码率、帧率、夜视效果和文件大小都依赖手机本身的相机/编码器。
 - Live Access 适合按需查看，不是安全摄像头的替代方案。
-- 当前没有 GPS、碰撞检测、云存储、多用户账号、说话人分离或 Android 自动化集成测试。
+- 当前没有 GPS、碰撞检测、云存储、多用户账号、实名说话人识别或 Android 自动化集成测试。

@@ -811,6 +811,9 @@ app.MapPost("/api/audio/{id:int}/transcription", async (
     audio.TranscriptModel = string.Empty;
     audio.TranscriptSegmentsJson = string.Empty;
     audio.TranscriptError = string.Empty;
+    audio.TranscriptDiarizationStatus = "none";
+    audio.TranscriptDiarizationError = string.Empty;
+    audio.TranscriptSpeakerCount = 0;
     audio.TranscriptCreatedAt = null;
     await db.SaveChangesAsync(token);
 
@@ -868,6 +871,9 @@ app.MapDelete("/api/audio/{id:int}/transcription", async (
     audio.TranscriptModel = string.Empty;
     audio.TranscriptSegmentsJson = string.Empty;
     audio.TranscriptError = string.Empty;
+    audio.TranscriptDiarizationStatus = "none";
+    audio.TranscriptDiarizationError = string.Empty;
+    audio.TranscriptSpeakerCount = 0;
     audio.TranscriptCreatedAt = null;
     await db.SaveChangesAsync(token);
 
@@ -2240,6 +2246,9 @@ static async Task EnsureAudioTableAsync(DashcamDbContext db)
     await EnsureColumnAsync(db, "AudioRecordings", "TranscriptModel", "TEXT NOT NULL DEFAULT ''");
     await EnsureColumnAsync(db, "AudioRecordings", "TranscriptSegmentsJson", "TEXT NOT NULL DEFAULT ''");
     await EnsureColumnAsync(db, "AudioRecordings", "TranscriptError", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptDiarizationStatus", "TEXT NOT NULL DEFAULT 'none'");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptDiarizationError", "TEXT NOT NULL DEFAULT ''");
+    await EnsureColumnAsync(db, "AudioRecordings", "TranscriptSpeakerCount", "INTEGER NOT NULL DEFAULT 0");
     await EnsureColumnAsync(db, "AudioRecordings", "TranscriptCreatedAt", "TEXT NULL");
 }
 
@@ -2415,6 +2424,9 @@ static async Task RunAudioTranscriptionAsync(
             audio.TranscriptModel = CleanOptionalText(result.Model, 80);
             audio.TranscriptSegmentsJson = JsonSerializer.Serialize(result.Segments ?? []);
             audio.TranscriptError = string.Empty;
+            audio.TranscriptDiarizationStatus = CleanOptionalText(result.DiarizationStatus, 24);
+            audio.TranscriptDiarizationError = CleanOptionalText(result.DiarizationError, 1000);
+            audio.TranscriptSpeakerCount = Math.Max(0, result.SpeakerCount);
             audio.TranscriptCreatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
         }
@@ -2476,6 +2488,9 @@ static object ToTranscriptResponse(AudioRecording audio, bool includeText)
         languageProbability = audio.TranscriptLanguageProbability,
         model = audio.TranscriptModel,
         error = audio.TranscriptError,
+        diarizationStatus = audio.TranscriptDiarizationStatus,
+        diarizationError = audio.TranscriptDiarizationError,
+        speakerCount = audio.TranscriptSpeakerCount,
         createdAt = audio.TranscriptCreatedAt.HasValue ? AsUtc(audio.TranscriptCreatedAt.Value) : (DateTime?)null,
         segments
     };
@@ -2487,14 +2502,45 @@ static string BuildTranscriptFile(AudioRecording audio)
     var probability = audio.TranscriptLanguageProbability > 0
         ? $" ({audio.TranscriptLanguageProbability:P0})"
         : string.Empty;
+    var transcript = audio.TranscriptText;
+    if (!string.IsNullOrWhiteSpace(audio.TranscriptSegmentsJson))
+    {
+        try
+        {
+            var segments = JsonSerializer.Deserialize<List<AudioTranscriptSegment>>(
+                audio.TranscriptSegmentsJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+            if (segments.Any(segment => !string.IsNullOrWhiteSpace(segment.Speaker)))
+            {
+                transcript = string.Join(Environment.NewLine, segments.Select(segment =>
+                    $"[{FormatTranscriptTimestamp(segment.Start)} - {FormatTranscriptTimestamp(segment.End)}] " +
+                    $"{segment.Speaker}: {segment.Text}"));
+            }
+        }
+        catch (JsonException)
+        {
+            // Keep the plain transcript when an older segment payload cannot be parsed.
+        }
+    }
+    var speakers = audio.TranscriptSpeakerCount > 0
+        ? audio.TranscriptSpeakerCount.ToString(CultureInfo.InvariantCulture)
+        : "Not separated";
     return $"""
         Audio: {audio.OriginalFilename}
         Recorded: {AsUtc(audio.StartTime):yyyy-MM-dd HH:mm:ss} UTC
         Language: {language}{probability}
         Model: {audio.TranscriptModel}
+        Speakers: {speakers}
 
-        {audio.TranscriptText}
+        {transcript}
         """;
+}
+
+static string FormatTranscriptTimestamp(double seconds)
+{
+    var safeSeconds = Math.Max(0, seconds);
+    var time = TimeSpan.FromSeconds(safeSeconds);
+    return $"{(int)time.TotalHours:00}:{time.Minutes:00}:{time.Seconds:00}.{time.Milliseconds / 100}";
 }
 
 static object ToResponse(Video video) => new
@@ -2527,6 +2573,9 @@ static object ToAudioResponse(AudioRecording audio) => new
     transcriptLanguageProbability = audio.TranscriptLanguageProbability,
     transcriptModel = audio.TranscriptModel,
     transcriptError = audio.TranscriptError,
+    transcriptDiarizationStatus = audio.TranscriptDiarizationStatus,
+    transcriptDiarizationError = audio.TranscriptDiarizationError,
+    transcriptSpeakerCount = audio.TranscriptSpeakerCount,
     transcriptCreatedAt = audio.TranscriptCreatedAt.HasValue ? AsUtc(audio.TranscriptCreatedAt.Value) : (DateTime?)null,
     UploadedAt = AsUtc(audio.UploadedAt),
     streamUrl = $"/api/audio/{audio.Id}/stream"
@@ -2762,13 +2811,16 @@ public sealed record AudioExportJob(
     DateTime CreatedAtUtc,
     DateTime? CompletedAtUtc);
 public sealed record VideoProbeInfo(double DurationSeconds, bool HasAudio);
-public sealed record AudioTranscriptSegment(double Start, double End, string Text);
+public sealed record AudioTranscriptSegment(double Start, double End, string Text, string? Speaker = null);
 public sealed record AudioTranscriptionWorkerResponse(
     string? Text,
     string? Language,
     double LanguageProbability,
     string? Model,
-    List<AudioTranscriptSegment>? Segments);
+    List<AudioTranscriptSegment>? Segments,
+    string? DiarizationStatus,
+    string? DiarizationError,
+    int SpeakerCount);
 public sealed record TimestampSegment(
     double OutputStartSeconds,
     double DurationSeconds,

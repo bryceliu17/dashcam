@@ -147,6 +147,14 @@ function Icon({ name }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true">{icons[name]}</svg>
 }
 
+const formatTranscriptTimestamp = (seconds = 0) => {
+  const tenths = Math.max(0, Math.round((Number(seconds) || 0) * 10))
+  const hours = Math.floor(tenths / 36000)
+  const minutes = Math.floor(tenths % 36000 / 600)
+  const remainingSeconds = Math.floor(tenths % 600 / 10)
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}.${tenths % 10}`
+}
+
 function SessionSelectionCheckbox({ items, selectedIds, setSelectedIds, label }) {
   const inputRef = useRef(null)
   const ids = items.map(item => item.id)
@@ -1572,6 +1580,9 @@ export default function App() {
       transcriptLanguageProbability: result.languageProbability,
       transcriptModel: result.model,
       transcriptError: result.error,
+      transcriptDiarizationStatus: result.diarizationStatus,
+      transcriptDiarizationError: result.diarizationError,
+      transcriptSpeakerCount: result.speakerCount,
       transcriptCreatedAt: result.createdAt,
     } : item))
   }, [])
@@ -2521,8 +2532,13 @@ export default function App() {
     {selectedTranscript && <div className="modal" onMouseDown={() => !selectedTranscript.deleting && setSelectedTranscript(null)}><div className="player transcript-modal" onMouseDown={event => event.stopPropagation()}>
       <div><strong>{selectedTranscript.recording.originalFilename || selectedTranscript.recording.filename}</strong><span className="player-actions">{selectedTranscript.status === 'ready' && <><a className="transcript-download" href={`${API}/api/audio/${selectedTranscript.recording.id}/transcription/download`}><Icon name="download" />Download TXT</a><button type="button" className="transcript-delete" disabled={selectedTranscript.deleting} onClick={() => deleteAudioTranscript(selectedTranscript.recording)}><Icon name="trash" />{selectedTranscript.deleting ? 'Deleting…' : 'Delete transcript'}</button></>}<button className="close-player" aria-label="Close transcript" disabled={selectedTranscript.deleting} onClick={() => setSelectedTranscript(null)}>X</button></span></div>
       {selectedTranscript.loading ? <div className="transcript-loading"><div className="spinner" /><span>Loading transcript…</span></div> : selectedTranscript.error ? <div className="transcript-error">{selectedTranscript.error}</div> : <div className="transcript-body">
-        <div className="transcript-meta"><span>Language <strong>{selectedTranscript.language || 'Unknown'}{selectedTranscript.languageProbability ? ` · ${Math.round(selectedTranscript.languageProbability * 100)}%` : ''}</strong></span><span>Model <strong>{selectedTranscript.model || '—'}</strong></span></div>
-        <pre>{selectedTranscript.text || 'No speech was detected in this recording.'}</pre>
+        <div className="transcript-meta"><span>Language <strong>{selectedTranscript.language || 'Unknown'}{selectedTranscript.languageProbability ? ` · ${Math.round(selectedTranscript.languageProbability * 100)}%` : ''}</strong></span><span>Model <strong>{selectedTranscript.model || '—'}</strong></span><span>Speakers <strong>{selectedTranscript.diarizationStatus === 'ready' ? (selectedTranscript.speakerCount || 'No speech') : selectedTranscript.diarizationStatus === 'failed' ? 'Unavailable' : 'Not configured'}</strong></span></div>
+        {selectedTranscript.diarizationStatus !== 'ready' && <p className="transcript-diarization-note">{selectedTranscript.diarizationStatus === 'failed' ? `Speaker separation failed${selectedTranscript.diarizationError ? `: ${selectedTranscript.diarizationError}` : '.'}` : 'Speaker separation was not configured when this transcript was generated.'}</p>}
+        {selectedTranscript.segments?.some(segment => segment.speaker) ? <div className="transcript-segments">{selectedTranscript.segments.filter(segment => segment.speaker).map((segment, index) => <article key={`${segment.start}-${index}`}>
+          <time>{formatTranscriptTimestamp(segment.start)} – {formatTranscriptTimestamp(segment.end)}</time>
+          <strong>{segment.speaker}</strong>
+          <p>{segment.text}</p>
+        </article>)}</div> : <pre>{selectedTranscript.text || 'No speech was detected in this recording.'}</pre>}
       </div>}
     </div></div>}
     {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} onTorch={enabled => setLiveTorch(liveDevice.deviceId, enabled)} />}

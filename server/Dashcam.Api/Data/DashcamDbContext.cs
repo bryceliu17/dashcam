@@ -28,6 +28,8 @@ public sealed class DashcamDbContext(DbContextOptions<DashcamDbContext> options)
         audio.Property(x => x.TranscriptLanguage).HasMaxLength(24).IsRequired();
         audio.Property(x => x.TranscriptModel).HasMaxLength(80).IsRequired();
         audio.Property(x => x.TranscriptError).HasMaxLength(1000).IsRequired();
+        audio.Property(x => x.TranscriptDiarizationStatus).HasMaxLength(24).IsRequired();
+        audio.Property(x => x.TranscriptDiarizationError).HasMaxLength(1000).IsRequired();
         audio.HasIndex(x => x.StartTime);
         audio.HasIndex(x => x.Locked);
 
