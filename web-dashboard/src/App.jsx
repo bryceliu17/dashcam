@@ -641,7 +641,7 @@ function SessionPlayback({ session }) {
   </div>
 }
 
-function WaveformAudio({ recording }) {
+function WaveformAudio({ recording, autoPlay = true, showWaveform = true, onPlaybackTime, seekRequest }) {
   const audioRef = useRef(null)
   const canvasRef = useRef(null)
   const [peaks, setPeaks] = useState([])
@@ -649,7 +649,7 @@ function WaveformAudio({ recording }) {
   const [waveformError, setWaveformError] = useState('')
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(recording.durationSeconds || 0)
-  const [playing, setPlaying] = useState(true)
+  const [playing, setPlaying] = useState(false)
   const [playbackRate, setPlaybackRate] = useState(1)
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
   const waveformReferencePeak = useMemo(() => {
@@ -721,6 +721,16 @@ function WaveformAudio({ recording }) {
     })
   }, [peaks, currentTime, duration, canvasSize, waveformReferencePeak])
 
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio || !seekRequest) return
+    const maximum = duration || recording.durationSeconds || 0
+    const position = Math.min(maximum, Math.max(0, Number(seekRequest.time) || 0))
+    audio.currentTime = position
+    setCurrentTime(position)
+    audio.play().catch(() => setPlaying(false))
+  }, [seekRequest, duration, recording.durationSeconds])
+
   const seekWaveform = event => {
     const audio = audioRef.current
     if (!audio || !duration) return
@@ -752,20 +762,24 @@ function WaveformAudio({ recording }) {
   }
 
   return <div className="audio-waveform-player">
-    <div className="waveform" aria-label="Audio waveform" onClick={seekWaveform}>
+    {showWaveform && <div className="waveform" aria-label="Audio waveform" onClick={seekWaveform}>
       <canvas ref={canvasRef} />
       {loadingWaveform && <span>Generating waveform...</span>}
       {waveformError && <span>{waveformError}</span>}
-    </div>
+    </div>}
     <audio
       ref={audioRef}
-      autoPlay
+      autoPlay={autoPlay}
       src={`${API}/api/audio/${recording.id}/stream`}
       onLoadedMetadata={event => {
         event.currentTarget.playbackRate = playbackRate
         setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : recording.durationSeconds)
       }}
-      onTimeUpdate={event => setCurrentTime(event.currentTarget.currentTime)}
+      onTimeUpdate={event => {
+        const position = event.currentTarget.currentTime
+        setCurrentTime(position)
+        onPlaybackTime?.(position)
+      }}
       onPlay={() => setPlaying(true)}
       onPause={() => setPlaying(false)}
       onEnded={() => setPlaying(false)}
@@ -790,6 +804,41 @@ function WaveformAudio({ recording }) {
       </div>
     </div>
   </div>
+}
+
+function TranscriptViewer({ transcript, onClose, onDelete }) {
+  const [playbackTime, setPlaybackTime] = useState(0)
+  const [seekRequest, setSeekRequest] = useState(null)
+  const [waveformExpanded, setWaveformExpanded] = useState(false)
+  const segments = Array.isArray(transcript.segments)
+    ? transcript.segments.filter(segment => segment?.text)
+    : []
+  const hasSpeakerLabels = segments.some(segment => segment.speaker)
+
+  const seekToSegment = segment => {
+    setSeekRequest(current => ({
+      id: (current?.id || 0) + 1,
+      time: Number(segment.start) || 0,
+    }))
+  }
+
+  return <div className="modal" onMouseDown={() => !transcript.deleting && onClose()}><div className="player transcript-modal" onMouseDown={event => event.stopPropagation()}>
+    <div><strong>{transcript.recording.originalFilename || transcript.recording.filename}</strong><span className="player-actions">{transcript.status === 'ready' && <><a className="transcript-download" href={`${API}/api/audio/${transcript.recording.id}/transcription/download`}><Icon name="download" />Download TXT</a><button type="button" className="transcript-delete" disabled={transcript.deleting} onClick={() => onDelete(transcript.recording)}><Icon name="trash" />{transcript.deleting ? 'Deleting…' : 'Delete transcript'}</button></>}<button className="close-player" aria-label="Close transcript" disabled={transcript.deleting} onClick={onClose}>X</button></span></div>
+    {transcript.loading ? <div className="transcript-loading"><div className="spinner" /><span>Loading transcript…</span></div> : transcript.error ? <div className="transcript-error">{transcript.error}</div> : <div className="transcript-body">
+      <div className="transcript-meta"><span>Language <strong>{transcript.language || 'Unknown'}{transcript.languageProbability ? ` · ${Math.round(transcript.languageProbability * 100)}%` : ''}</strong></span><span>Model <strong>{transcript.model || '—'}</strong></span><span>Speakers <strong>{transcript.diarizationStatus === 'ready' ? (transcript.speakerCount || 'No speech') : transcript.diarizationStatus === 'failed' ? 'Unavailable' : 'Not configured'}</strong></span></div>
+      {transcript.diarizationStatus !== 'ready' && <p className="transcript-diarization-note">{transcript.diarizationStatus === 'failed' ? `Speaker separation failed${transcript.diarizationError ? `: ${transcript.diarizationError}` : '.'}` : 'Speaker separation was not configured when this transcript was generated.'}</p>}
+      <div className={`transcript-player ${waveformExpanded ? '' : 'collapsed'}`}><div className="transcript-player-toolbar"><strong>Audio playback</strong><button type="button" onClick={() => setWaveformExpanded(current => !current)}>{waveformExpanded ? 'Hide waveform' : 'Show waveform'}</button></div><WaveformAudio recording={transcript.recording} autoPlay={false} showWaveform={waveformExpanded} onPlaybackTime={setPlaybackTime} seekRequest={seekRequest} /></div>
+      {segments.length ? <div className="transcript-segments">{segments.map((segment, index) => {
+        const active = playbackTime >= Number(segment.start) && playbackTime < Number(segment.end)
+        return <button type="button" className={`${segment.speaker ? 'has-speaker ' : ''}${active ? 'active' : ''}`} key={`${segment.start}-${index}`} onClick={() => seekToSegment(segment)} aria-label={`Play transcript from ${formatTranscriptTimestamp(segment.start)}`}>
+          <time>{formatTranscriptTimestamp(segment.start)} – {formatTranscriptTimestamp(segment.end)}</time>
+          {segment.speaker && <strong>{segment.speaker}</strong>}
+          <p>{segment.text}</p>
+        </button>
+      })}</div> : <pre>{transcript.text || 'No speech was detected in this recording.'}</pre>}
+      {hasSpeakerLabels && <p className="transcript-click-hint">Click a line to play from that point. The active line follows playback.</p>}
+    </div>}
+  </div></div>
 }
 
 function AudioSessionPlayback({ session }) {
@@ -2529,18 +2578,7 @@ export default function App() {
       <AudioSessionPlayback key={selectedAudioSession.number} session={selectedAudioSession} />
       <p>{formatDate(selectedAudioSession.recordings[0].startTime)} to {formatDate(selectedAudioSession.recordings.at(-1).endTime)} | {formatTotalDuration(selectedAudioSession.durationSeconds)} including short silent intervals</p>
     </div></div>}
-    {selectedTranscript && <div className="modal" onMouseDown={() => !selectedTranscript.deleting && setSelectedTranscript(null)}><div className="player transcript-modal" onMouseDown={event => event.stopPropagation()}>
-      <div><strong>{selectedTranscript.recording.originalFilename || selectedTranscript.recording.filename}</strong><span className="player-actions">{selectedTranscript.status === 'ready' && <><a className="transcript-download" href={`${API}/api/audio/${selectedTranscript.recording.id}/transcription/download`}><Icon name="download" />Download TXT</a><button type="button" className="transcript-delete" disabled={selectedTranscript.deleting} onClick={() => deleteAudioTranscript(selectedTranscript.recording)}><Icon name="trash" />{selectedTranscript.deleting ? 'Deleting…' : 'Delete transcript'}</button></>}<button className="close-player" aria-label="Close transcript" disabled={selectedTranscript.deleting} onClick={() => setSelectedTranscript(null)}>X</button></span></div>
-      {selectedTranscript.loading ? <div className="transcript-loading"><div className="spinner" /><span>Loading transcript…</span></div> : selectedTranscript.error ? <div className="transcript-error">{selectedTranscript.error}</div> : <div className="transcript-body">
-        <div className="transcript-meta"><span>Language <strong>{selectedTranscript.language || 'Unknown'}{selectedTranscript.languageProbability ? ` · ${Math.round(selectedTranscript.languageProbability * 100)}%` : ''}</strong></span><span>Model <strong>{selectedTranscript.model || '—'}</strong></span><span>Speakers <strong>{selectedTranscript.diarizationStatus === 'ready' ? (selectedTranscript.speakerCount || 'No speech') : selectedTranscript.diarizationStatus === 'failed' ? 'Unavailable' : 'Not configured'}</strong></span></div>
-        {selectedTranscript.diarizationStatus !== 'ready' && <p className="transcript-diarization-note">{selectedTranscript.diarizationStatus === 'failed' ? `Speaker separation failed${selectedTranscript.diarizationError ? `: ${selectedTranscript.diarizationError}` : '.'}` : 'Speaker separation was not configured when this transcript was generated.'}</p>}
-        {selectedTranscript.segments?.some(segment => segment.speaker) ? <div className="transcript-segments">{selectedTranscript.segments.filter(segment => segment.speaker).map((segment, index) => <article key={`${segment.start}-${index}`}>
-          <time>{formatTranscriptTimestamp(segment.start)} – {formatTranscriptTimestamp(segment.end)}</time>
-          <strong>{segment.speaker}</strong>
-          <p>{segment.text}</p>
-        </article>)}</div> : <pre>{selectedTranscript.text || 'No speech was detected in this recording.'}</pre>}
-      </div>}
-    </div></div>}
+    {selectedTranscript && <TranscriptViewer transcript={selectedTranscript} onClose={() => setSelectedTranscript(null)} onDelete={deleteAudioTranscript} />}
     {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} onTorch={enabled => setLiveTorch(liveDevice.deviceId, enabled)} />}
     {batteryHistory && <BatteryHistoryModal state={batteryHistory} onRange={hours => loadBatteryHistory(batteryHistory.device, hours)} onClose={closeBatteryHistory} />}
   </div>
