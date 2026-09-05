@@ -39,6 +39,7 @@ import com.example.dashcam.network.ServerClient
 import com.example.dashcam.network.toJson
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.upload.UploadWorker
+import com.example.dashcam.upload.UploadPolicySettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -292,6 +293,10 @@ class LiveAccessService : Service() {
     private fun handleControlMessage(message: JSONObject) {
         when (message.optString("type")) {
             "live_request" -> applyLiveRequest(message.optBoolean("enabled", false))
+            "upload_policy" -> UploadPolicySettings.update(
+                this,
+                message.optBoolean("allowed", true)
+            )
             "torch_request" -> applyTorchRequest(
                 message.optString("requestId"),
                 message.optBoolean("enabled", false)

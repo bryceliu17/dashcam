@@ -37,7 +37,13 @@ data class DeviceHeartbeat(
 )
 
 data class BatteryHistoryRequest(val requestId: String, val hours: Int)
-data class DeviceControl(val liveRequested: Boolean, val batteryHistoryRequest: BatteryHistoryRequest? = null)
+data class DeviceControl(
+    val liveRequested: Boolean,
+    val batteryHistoryRequest: BatteryHistoryRequest? = null,
+    val mobileUploadsAllowed: Boolean = true
+)
+
+class MobileUploadsDisabledException : IllegalStateException("The server is not accepting phone uploads")
 
 fun DeviceHeartbeat.toJson(): JSONObject = JSONObject()
     .put("deviceId", deviceId)
@@ -84,6 +90,20 @@ class ServerClient(private val baseUrl: String) {
         client.newCall(request).execute().use { it.isSuccessful }
     } catch (_: Exception) { false }
 
+    fun mobileUploadsAllowed(): Boolean {
+        val request = Request.Builder().url("${cleanBase()}/api/uploads/permission")
+            .header("Connection", "close")
+            .get().build()
+        heartbeatClient.newCall(request).execute().use { response ->
+            if (response.code == 404) return true
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
+            }
+            return JSONObject(text).optBoolean("allowed", true)
+        }
+    }
+
     fun upload(video: VideoEntity, playbackRotationDegrees: Int): Long {
         val file = File(video.localPath)
         require(file.exists()) { "Local file is missing: ${video.filename}" }
@@ -101,6 +121,8 @@ class ServerClient(private val baseUrl: String) {
             .post(body).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
+            if (response.code == 503 && text.contains("mobile_uploads_disabled"))
+                throw MobileUploadsDisabledException()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
             return JSONObject(text).getLong("id")
         }
@@ -122,6 +144,8 @@ class ServerClient(private val baseUrl: String) {
             .post(body).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
+            if (response.code == 503 && text.contains("mobile_uploads_disabled"))
+                throw MobileUploadsDisabledException()
             if (!response.isSuccessful) throw IllegalStateException("Server returned ${response.code}: ${text.take(300)}")
             return JSONObject(text).getLong("id")
         }
@@ -160,7 +184,11 @@ class ServerClient(private val baseUrl: String) {
                     request.optInt("hours", 24).coerceIn(1, 72)
                 )
             }
-            return DeviceControl(json.optBoolean("liveRequested", false), history)
+            return DeviceControl(
+                json.optBoolean("liveRequested", false),
+                history,
+                json.optBoolean("mobileUploadsAllowed", true)
+            )
         }
     }
 
