@@ -733,12 +733,6 @@ class MainActivity : ComponentActivity() {
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -1, 1f))
-        videoTitleRow.addView(TextView(this).apply {
-            text = "Max per video: ${VideoSegmentSettings.displayLabel(this@MainActivity)}"
-            textSize = 12f
-            setTextColor(Color.rgb(75, 85, 99))
-            setSingleLine(true)
-        }, LinearLayout.LayoutParams(-2, -1).apply { marginStart = dp(8) })
         root.addView(videoTitleRow, LinearLayout.LayoutParams(-1, dp(42)).apply { bottomMargin = dp(3) })
         root.addView(TextView(this).apply {
             text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.maxVideoBytes(this@MainActivity))}"
@@ -850,12 +844,6 @@ class MainActivity : ComponentActivity() {
             setSingleLine(true)
             ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, -1, 1f))
-        audioTitleRow.addView(TextView(this).apply {
-            text = "Max per audio: ${AudioSegmentSettings.displayLabel(this@MainActivity)}"
-            textSize = 12f
-            setTextColor(Color.rgb(75, 85, 99))
-            setSingleLine(true)
-        }, LinearLayout.LayoutParams(-2, -1).apply { marginStart = dp(8) })
         root.addView(audioTitleRow, LinearLayout.LayoutParams(-1, dp(42)).apply { bottomMargin = dp(3) })
         root.addView(TextView(this).apply {
             text = "${audioFiles.size} recordings - ${formatBytes(audioFiles.sumOf { it.file.length() })} / ${formatBytes(AudioStoragePolicy.maxAudioBytes(this@MainActivity))}"
