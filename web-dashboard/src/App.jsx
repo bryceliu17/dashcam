@@ -1613,6 +1613,7 @@ export default function App() {
   const [audioExport, setAudioExport] = useState(null)
   const [storageSettingsOpen, setStorageSettingsOpen] = useState(false)
   const [storageSettingsSaving, setStorageSettingsSaving] = useState(false)
+  const [uploadPolicySaving, setUploadPolicySaving] = useState(false)
   const [storageDraft, setStorageDraft] = useState({ video: '', audio: '' })
   const [migrationBusy, setMigrationBusy] = useState(false)
   const migrationUploadAbort = useRef(null)
@@ -1861,6 +1862,28 @@ export default function App() {
       setError(err.message)
     } finally {
       setStorageSettingsSaving(false)
+    }
+  }
+
+  const toggleMobileUploads = async () => {
+    if (!storage || uploadPolicySaving) return
+    const acceptMobileUploads = storage.mobileUploadsAllowed === false
+    setUploadPolicySaving(true)
+    setError('')
+    try {
+      const result = await api('/api/uploads/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acceptMobileUploads }),
+      })
+      setStorage(current => current ? {
+        ...current,
+        mobileUploadsAllowed: result.mobileUploadsAllowed,
+      } : current)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUploadPolicySaving(false)
     }
   }
   const videoSessions = useMemo(() => {
@@ -2332,8 +2355,27 @@ export default function App() {
           <small>{storage?.recommendedCombinedStorageBytes
             ? `Recommended combined video and audio budget: ${formatBytes(storage.recommendedCombinedStorageBytes)} (${storage.recommendationPercent}% of disk)`
             : 'The recommendation will appear when disk information is available.'}</small>
+          <small className={storage?.mobileUploadsAllowed === false ? 'upload-policy-paused' : 'upload-policy-accepting'}>
+            {storage?.mobileUploadsAllowed === false
+              ? 'Phone uploads are paused. Pending files stay on each phone and periodically check whether uploads are accepted again.'
+              : 'Phone uploads are accepted, including automatic and manual uploads.'}
+          </small>
         </div>
-        <button type="button" onClick={openStorageSettings} disabled={!storage}>Set limits</button>
+        <div className="storage-limit-actions">
+          <button
+            type="button"
+            className={storage?.mobileUploadsAllowed === false ? 'uploads-paused' : 'uploads-accepting'}
+            onClick={toggleMobileUploads}
+            disabled={!storage || uploadPolicySaving}
+          >
+            {uploadPolicySaving
+              ? 'Saving…'
+              : storage?.mobileUploadsAllowed === false
+                ? 'Resume phone uploads'
+                : 'Pause phone uploads'}
+          </button>
+          <button type="button" onClick={openStorageSettings} disabled={!storage}>Set limits</button>
+        </div>
       </section>
 
       {storageSettingsOpen && <form className="storage-settings-panel" onSubmit={saveStorageSettings}>

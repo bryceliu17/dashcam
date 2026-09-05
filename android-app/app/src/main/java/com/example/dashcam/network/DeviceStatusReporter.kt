@@ -14,6 +14,7 @@ import com.example.dashcam.battery.BatteryHistoryPayload
 import com.example.dashcam.live.LiveAccessSettings
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.upload.UploadWorker
+import com.example.dashcam.upload.UploadPolicySettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,6 +67,7 @@ object DeviceStatusReporter {
             val client = ServerClient(serverUrl)
             client.reportDeviceStatus(status).also {
                 updateServerReachability(appContext, true)
+                UploadPolicySettings.update(appContext, it.mobileUploadsAllowed)
                 it.batteryHistoryRequest?.let { request ->
                     respondToBatteryHistoryRequest(appContext, client, request)
                 }

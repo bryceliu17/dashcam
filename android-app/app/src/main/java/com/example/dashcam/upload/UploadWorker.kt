@@ -17,6 +17,7 @@ import androidx.work.Constraints
 import androidx.work.workDataOf
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.network.ServerClient
+import com.example.dashcam.network.MobileUploadsDisabledException
 import com.example.dashcam.recording.PowerRecordingSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -85,7 +86,15 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
 
         val client = ServerClient(serverUrl)
-        if (!client.health()) return failureOrDefer(manual, "Server is unreachable: $serverUrl")
+        val uploadsAllowed = try {
+            client.mobileUploadsAllowed()
+        } catch (error: Exception) {
+            return failureOrDefer(manual, "Server is unreachable: $serverUrl")
+        }
+        UploadPolicySettings.update(applicationContext, uploadsAllowed)
+        if (!uploadsAllowed) {
+            return failureOrDefer(manual, "Server is not accepting phone uploads")
+        }
         if (!manual && PowerRecordingSettings.isAnyRecordingActive(applicationContext)) {
             return Result.success(workDataOf(KEY_MESSAGE to "Automatic upload deferred while recording"))
         }
@@ -94,6 +103,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         var uploadedVideos = 0
         var uploadedAudio = 0
         var lastError = "Upload failed"
+        var uploadsBlocked = false
         val wifiLock = acquireWifiLock()
         try {
             for (video in candidates) {
@@ -116,9 +126,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     failed = true
                     lastError = error.message?.take(500) ?: "Upload failed"
                     dao.markFailed(video.id, lastError, System.currentTimeMillis())
+                    if (error is MobileUploadsDisabledException) {
+                        UploadPolicySettings.update(applicationContext, false)
+                        uploadsBlocked = true
+                        break
+                    }
                 }
             }
-            for (audio in audioCandidates) {
+            for (audio in if (uploadsBlocked) emptyList() else audioCandidates) {
                 if (!manual && (
                         !isAutomaticUploadEnabled(applicationContext) ||
                             PowerRecordingSettings.isAnyRecordingActive(applicationContext)
@@ -142,6 +157,10 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     failed = true
                     lastError = error.message?.take(500) ?: "Upload failed"
                     audioDao.markFailed(audio.id, lastError, System.currentTimeMillis())
+                    if (error is MobileUploadsDisabledException) {
+                        UploadPolicySettings.update(applicationContext, false)
+                        break
+                    }
                 }
             }
         } finally {

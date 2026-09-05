@@ -30,6 +30,7 @@ public sealed class DeviceWebSocketHub
         string deviceId,
         WebSocket socket,
         bool initialLiveRequested,
+        bool initialMobileUploadsAllowed,
         Func<string, CancellationToken, Task> handleMessage,
         CancellationToken cancellationToken)
     {
@@ -41,6 +42,7 @@ public sealed class DeviceWebSocketHub
         try
         {
             await SendLiveRequestAsync(deviceId, initialLiveRequested, cancellationToken);
+            await SendMobileUploadPolicyAsync(deviceId, initialMobileUploadsAllowed, cancellationToken);
             while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
                 var message = await ReceiveTextAsync(socket, cancellationToken);
@@ -67,6 +69,20 @@ public sealed class DeviceWebSocketHub
         bool enabled,
         CancellationToken cancellationToken) =>
         SendJsonAsync(deviceId, new { type = "live_request", enabled }, cancellationToken);
+
+    public Task<bool> SendMobileUploadPolicyAsync(
+        string deviceId,
+        bool allowed,
+        CancellationToken cancellationToken) =>
+        SendJsonAsync(deviceId, new { type = "upload_policy", allowed }, cancellationToken);
+
+    public async Task BroadcastMobileUploadPolicyAsync(
+        bool allowed,
+        CancellationToken cancellationToken)
+    {
+        foreach (var deviceId in devices.Keys)
+            await SendMobileUploadPolicyAsync(deviceId, allowed, cancellationToken);
+    }
 
     public Task<bool> SendTorchRequestAsync(
         string deviceId,

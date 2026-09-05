@@ -26,6 +26,7 @@ builder.Services.AddSingleton<BatteryHistoryBroker>();
 builder.Services.AddSingleton<LiveTorchBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveStorageSettingsService>();
+builder.Services.AddSingleton<MobileUploadSettingsService>();
 builder.Services.AddSingleton<ArchiveMigrationService>();
 builder.Services.AddSingleton<MigrationUploadService>();
 builder.Services.AddHttpClient("TranscriptionWorker", client =>
@@ -114,6 +115,7 @@ app.MapGet("/api/devices/socket", async (
     HttpContext context,
     DashcamDbContext db,
     DeviceWebSocketHub sockets,
+    MobileUploadSettingsService uploadSettings,
     BatteryHistoryBroker batteryHistory,
     LiveTorchBroker liveTorch,
     LiveFrameStore liveFrames,
@@ -159,6 +161,7 @@ app.MapGet("/api/devices/socket", async (
         deviceId,
         socket,
         device.LiveRequested,
+        uploadSettings.IsAllowed,
         async (message, messageCancellationToken) =>
         {
             var historyResponse = ParseBatteryHistoryResponse(message);
@@ -203,6 +206,7 @@ app.MapPost("/api/devices/heartbeat", async (
     LiveFrameStore liveFrames,
     DeviceWebSocketHub sockets,
     BatteryHistoryBroker batteryHistory,
+    MobileUploadSettingsService uploadSettings,
     CancellationToken cancellationToken) =>
 {
     var deviceId = CleanRequiredText(request.DeviceId, 128);
@@ -224,6 +228,7 @@ app.MapPost("/api/devices/heartbeat", async (
     return Results.Ok(new
     {
         device.LiveRequested,
+        mobileUploadsAllowed = uploadSettings.IsAllowed,
         batteryHistoryRequest = batteryHistory.GetPendingRequest(deviceId)
     });
 });
@@ -436,9 +441,14 @@ app.MapPost("/api/videos/upload", async (
     DashcamDbContext db,
     IConfiguration configuration,
     ArchiveStorageSettingsService storageSettings,
+    MobileUploadSettingsService uploadSettings,
     ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
+    if (!uploadSettings.IsAllowed)
+        return Results.Json(
+            new { code = "mobile_uploads_disabled", error = "The server is not accepting phone uploads." },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
     if (!request.HasFormContentType)
         return Results.BadRequest(new { error = "multipart/form-data is required." });
 
@@ -543,9 +553,14 @@ app.MapPost("/api/audio/upload", async (
     DashcamDbContext db,
     IConfiguration configuration,
     ArchiveStorageSettingsService storageSettings,
+    MobileUploadSettingsService uploadSettings,
     ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
+    if (!uploadSettings.IsAllowed)
+        return Results.Json(
+            new { code = "mobile_uploads_disabled", error = "The server is not accepting phone uploads." },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
     if (!request.HasFormContentType)
         return Results.BadRequest(new { error = "multipart/form-data is required." });
 
@@ -1448,6 +1463,7 @@ app.MapPatch("/api/videos/{id:int}/rotation", async (
 app.MapGet("/api/storage/status", async (
     DashcamDbContext db,
     ArchiveStorageSettingsService storageSettings,
+    MobileUploadSettingsService uploadSettings,
     CancellationToken token) =>
 {
     var totalVideoCount = await db.Videos.CountAsync(token);
@@ -1478,8 +1494,23 @@ app.MapGet("/api/storage/status", async (
         recommendation.RecommendedVideoStorageBytes,
         recommendation.RecommendedAudioStorageBytes,
         recommendation.UsesSharedDisk,
+        mobileUploadsAllowed = uploadSettings.IsAllowed,
         recommendationPercent = ArchiveStorageSettingsService.RecommendationRatio * 100
     });
+});
+
+app.MapGet("/api/uploads/permission", (MobileUploadSettingsService uploadSettings) =>
+    Results.Ok(new { allowed = uploadSettings.IsAllowed }));
+
+app.MapPut("/api/uploads/settings", async (
+    MobileUploadSettingsRequest request,
+    MobileUploadSettingsService uploadSettings,
+    DeviceWebSocketHub sockets,
+    CancellationToken token) =>
+{
+    var allowed = uploadSettings.Save(request.AcceptMobileUploads);
+    await sockets.BroadcastMobileUploadPolicyAsync(allowed, token);
+    return Results.Ok(new { mobileUploadsAllowed = allowed });
 });
 
 app.MapPut("/api/storage/settings", (
@@ -2792,6 +2823,7 @@ public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
 public sealed record ArchiveStorageSettingsRequest(double MaxVideoStorageGb, double MaxAudioStorageGb);
+public sealed record MobileUploadSettingsRequest(bool AcceptMobileUploads);
 public sealed record VideoExportRequest(int[] Ids, bool WithTimestamp, int TimezoneOffsetMinutes);
 public sealed record AudioExportRequest(int[] Ids);
 public sealed record VideoExportJob(
