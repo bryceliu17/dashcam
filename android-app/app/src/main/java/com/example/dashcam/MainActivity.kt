@@ -71,6 +71,7 @@ import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.StoragePolicy
+import com.example.dashcam.recording.StorageLimitSettings
 import com.example.dashcam.recording.VideoSegmentSettings
 import com.example.dashcam.recording.VolumeKeyAccessibilityService
 import com.example.dashcam.upload.UploadWorker
@@ -580,6 +581,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        root.addView(actionButton("Storage Limits") {
+            showStorageLimitDialog()
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Upload Now") {
             startManualUpload()
@@ -732,7 +736,7 @@ class MainActivity : ComponentActivity() {
         }, LinearLayout.LayoutParams(-2, -1).apply { marginStart = dp(8) })
         root.addView(videoTitleRow, LinearLayout.LayoutParams(-1, dp(42)).apply { bottomMargin = dp(3) })
         root.addView(TextView(this).apply {
-            text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.MAX_VIDEO_BYTES)}"
+            text = "${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.maxVideoBytes(this@MainActivity))}"
             textSize = 14f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, 0, 0, dp(10))
@@ -849,7 +853,7 @@ class MainActivity : ComponentActivity() {
         }, LinearLayout.LayoutParams(-2, -1).apply { marginStart = dp(8) })
         root.addView(audioTitleRow, LinearLayout.LayoutParams(-1, dp(42)).apply { bottomMargin = dp(3) })
         root.addView(TextView(this).apply {
-            text = "${audioFiles.size} recordings - ${formatBytes(audioFiles.sumOf { it.file.length() })} / ${formatBytes(AudioStoragePolicy.MAX_AUDIO_BYTES)}"
+            text = "${audioFiles.size} recordings - ${formatBytes(audioFiles.sumOf { it.file.length() })} / ${formatBytes(AudioStoragePolicy.maxAudioBytes(this@MainActivity))}"
             textSize = 14f
             setTextColor(Color.rgb(55, 65, 81))
             setPadding(0, 0, 0, dp(10))
@@ -1827,6 +1831,66 @@ class MainActivity : ComponentActivity() {
         dialog.show()
     }
 
+    private fun showStorageLimitDialog() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+        }
+        val videoInput = storageLimitInput(StoragePolicy.maxVideoBytes(this))
+        val audioInput = storageLimitInput(AudioStoragePolicy.maxAudioBytes(this))
+        content.addView(TextView(this).apply { text = "Video storage limit (GiB)" })
+        content.addView(videoInput, LinearLayout.LayoutParams(-1, dp(52)))
+        content.addView(TextView(this).apply {
+            text = "Audio storage limit (GiB)"
+            setPadding(0, dp(12), 0, 0)
+        })
+        content.addView(audioInput, LinearLayout.LayoutParams(-1, dp(52)))
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Local Storage Limits")
+            .setMessage("Limits are checked when recording starts or a segment finishes. Existing files are not deleted immediately.")
+            .setView(content)
+            .setPositiveButton("Save", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val videoGiB = parseGiB(videoInput)
+                val audioGiB = parseGiB(audioInput)
+                if (videoGiB == null) {
+                    videoInput.error = "Enter a number greater than 0"
+                    return@setOnClickListener
+                }
+                if (audioGiB == null) {
+                    audioInput.error = "Enter a number greater than 0"
+                    return@setOnClickListener
+                }
+                StorageLimitSettings.setLimitsGiB(this, videoGiB, audioGiB)
+                updateStorageStatus()
+                updateAudioStorageStatus()
+                toast("Storage limits saved")
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun storageLimitInput(bytes: Long) = EditText(this).apply {
+        inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        setSingleLine(true)
+        setText(formatLimitGiB(bytes))
+        setSelection(text.length)
+    }
+
+    private fun parseGiB(input: EditText): Double? =
+        input.text.toString().trim().replace(',', '.').toDoubleOrNull()
+            ?.takeIf { it.isFinite() && it > 0.0 }
+
+    private fun formatLimitGiB(bytes: Long): String {
+        val value = bytes.toDouble() / StorageLimitSettings.BYTES_PER_GIB.toDouble()
+        return String.format(Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
+    }
+
     private fun audioSegmentDurationPosition(minutes: Int): Int {
         val preset = AUDIO_SEGMENT_DURATION_CHOICES.indexOfFirst { it.minutes == minutes }
         return if (preset >= 0) preset else CUSTOM_AUDIO_DURATION_POSITION
@@ -2297,13 +2361,13 @@ class MainActivity : ComponentActivity() {
 
     private fun updateStorageStatus() {
         if (!::storageStatus.isInitialized) return
-        storageStatus.text = "Local Videos: ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.MAX_VIDEO_BYTES)}"
+        storageStatus.text = "Local Videos: ${videos.size} videos - ${formatBytes(videos.sumOf { it.fileSizeBytes })} / ${formatBytes(StoragePolicy.maxVideoBytes(this))}"
     }
 
     private fun updateAudioStorageStatus() {
         if (!::audioStorageStatus.isInitialized) return
         audioStorageStatus.text =
-            "Local Audio: ${audioRecords.size} recordings - ${formatBytes(audioRecords.sumOf { it.fileSizeBytes })} / ${formatBytes(AudioStoragePolicy.MAX_AUDIO_BYTES)}"
+            "Local Audio: ${audioRecords.size} recordings - ${formatBytes(audioRecords.sumOf { it.fileSizeBytes })} / ${formatBytes(AudioStoragePolicy.maxAudioBytes(this))}"
     }
 
     private fun observeAudioRecords() {
