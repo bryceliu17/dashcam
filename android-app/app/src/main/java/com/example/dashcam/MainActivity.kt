@@ -1856,7 +1856,11 @@ class MainActivity : ComponentActivity() {
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("Local Storage Limits")
-            .setMessage("Limits are checked when recording starts or a segment finishes. Existing files are not deleted immediately.")
+            .setMessage(
+                "Changing these limits does not delete or clean up existing files now.\n\n" +
+                    "Video: checked before each segment starts.\n" +
+                    "Audio: checked when audio recording starts and after each segment is saved."
+            )
             .setView(content)
             .setPositiveButton("Save", null)
             .setNegativeButton("Cancel", null)
