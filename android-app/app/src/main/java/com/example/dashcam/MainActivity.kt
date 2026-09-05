@@ -1845,6 +1845,14 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(12), 0, 0)
         })
         content.addView(audioInput, LinearLayout.LayoutParams(-1, dp(52)))
+        content.addView(TextView(this).apply {
+            val recommendedBytes = recommendedCombinedStorageBytes()
+            text = "Recommended combined maximum: ${formatLimitGiB(recommendedBytes)} GiB\n" +
+                "Video + audio limits should add up to no more than this value. Keeps 1 GiB free."
+            textSize = 13f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(14), 0, dp(4))
+        })
 
         val dialog = AlertDialog.Builder(this)
             .setTitle("Local Storage Limits")
@@ -1890,6 +1898,20 @@ class MainActivity : ComponentActivity() {
         val value = bytes.toDouble() / StorageLimitSettings.BYTES_PER_GIB.toDouble()
         return String.format(Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
     }
+
+    private fun recommendedCombinedStorageBytes(): Long {
+        val videoDirectory = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "dashcam")
+        val audioDirectory = audioDirectory()
+        val currentMediaBytes = directoryBytes(videoDirectory) + directoryBytes(audioDirectory)
+        val storageRoot = getExternalFilesDir(null) ?: filesDir
+        val additionalBytes = (storageRoot.usableSpace - StorageLimitSettings.BYTES_PER_GIB).coerceAtLeast(0L)
+        return currentMediaBytes + additionalBytes.coerceAtMost(Long.MAX_VALUE - currentMediaBytes)
+    }
+
+    private fun directoryBytes(directory: File): Long =
+        directory.listFiles().orEmpty()
+            .filter(File::isFile)
+            .sumOf(File::length)
 
     private fun audioSegmentDurationPosition(minutes: Int): Int {
         val preset = AUDIO_SEGMENT_DURATION_CHOICES.indexOfFirst { it.minutes == minutes }
