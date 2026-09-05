@@ -27,6 +27,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -105,6 +106,13 @@ class MainActivity : ComponentActivity() {
     private var suppressSegmentDurationSelection = false
     private var suppressAudioSegmentDurationSelection = false
     private lateinit var previewView: PreviewView
+    private lateinit var previewContainer: FrameLayout
+    private lateinit var previewFullscreenStatus: TextView
+    private lateinit var homeScroll: ScrollView
+    private lateinit var homeRoot: LinearLayout
+    private var previewAvailable = false
+    private var previewFullscreen = false
+    private val homeChildVisibility = mutableMapOf<View, Int>()
     private lateinit var videoList: ListView
     private lateinit var adapter: ArrayAdapter<VideoEntity>
     private var videos: List<VideoEntity> = emptyList()
@@ -299,6 +307,7 @@ class MainActivity : ComponentActivity() {
         checkServer()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (exitPreviewFullscreen()) return
                 if (exitVideoFullscreen?.invoke() == true) return
                 if (showingVideoManager) {
                     showingVideoManager = false
@@ -363,6 +372,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildUi() {
+        previewFullscreen = false
+        previewAvailable = false
+        homeChildVisibility.clear()
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         showingVideoList = false
         showingAudioList = false
         showingBatteryHistory = false
@@ -405,8 +418,32 @@ class MainActivity : ComponentActivity() {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FIT_CENTER
             setBackgroundColor(Color.BLACK)
+            isClickable = true
         }
-        root.addView(previewView, LinearLayout.LayoutParams(-1, previewHeight()).apply { topMargin = dp(14) })
+        previewFullscreenStatus = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(170, 0, 0, 0))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            visibility = View.GONE
+        }
+        previewContainer = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isClickable = true
+            addView(previewView, FrameLayout.LayoutParams(-1, -1))
+            addView(
+                previewFullscreenStatus,
+                FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
+                    leftMargin = dp(12)
+                    topMargin = dp(12)
+                }
+            )
+            setOnClickListener { togglePreviewFullscreen() }
+        }
+        previewView.setOnClickListener { togglePreviewFullscreen() }
+        root.addView(previewContainer, normalPreviewLayoutParams())
+        homeScroll = scroll
+        homeRoot = root
         updatePreviewAvailability()
 
         val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
@@ -1927,6 +1964,8 @@ class MainActivity : ComponentActivity() {
         val backgroundActive = backgroundRecordingActive || PowerRecordingSettings.isBackgroundRecordingActive(this)
         val volumeKeyStartEnabled = PowerRecordingSettings.isVolumeKeyStartEnabled(this)
         if (powerAutoEnabled || volumeKeyStartEnabled || backgroundActive || liveStreaming) {
+            previewAvailable = false
+            exitPreviewFullscreen()
             RecordingService.previewSurfaceProvider = null
             previewView.isEnabled = false
             previewView.alpha = 0.35f
@@ -1934,10 +1973,73 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        previewAvailable = true
         previewView.isEnabled = true
         previewView.alpha = 1f
         RecordingService.previewSurfaceProvider = previewView.surfaceProvider
         startPreviewOnly()
+    }
+
+    private fun normalPreviewLayoutParams() =
+        LinearLayout.LayoutParams(-1, previewHeight()).apply { topMargin = dp(14) }
+
+    private fun togglePreviewFullscreen() {
+        if (previewFullscreen) {
+            exitPreviewFullscreen()
+        } else {
+            enterPreviewFullscreen()
+        }
+    }
+
+    private fun enterPreviewFullscreen() {
+        if (!previewAvailable || !::homeRoot.isInitialized || !::previewContainer.isInitialized) return
+        previewFullscreen = true
+        homeChildVisibility.clear()
+        for (index in 0 until homeRoot.childCount) {
+            val child = homeRoot.getChildAt(index)
+            if (child !== previewContainer) {
+                homeChildVisibility[child] = child.visibility
+                child.visibility = View.GONE
+            }
+        }
+        homeRoot.setPadding(0, 0, 0, 0)
+        previewContainer.layoutParams = LinearLayout.LayoutParams(-1, resources.displayMetrics.heightPixels)
+        homeScroll.isFillViewport = true
+        homeScroll.scrollTo(0, 0)
+        previewFullscreenStatus.visibility = View.VISIBLE
+        updatePreviewFullscreenStatus()
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            )
+    }
+
+    private fun exitPreviewFullscreen(): Boolean {
+        if (!previewFullscreen || !::homeRoot.isInitialized || !::previewContainer.isInitialized) return false
+        previewFullscreen = false
+        homeChildVisibility.forEach { (child, visibility) -> child.visibility = visibility }
+        homeChildVisibility.clear()
+        homeRoot.setPadding(dp(20), dp(18), dp(20), dp(18))
+        previewContainer.layoutParams = normalPreviewLayoutParams()
+        previewFullscreenStatus.visibility = View.GONE
+        homeScroll.isFillViewport = false
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        return true
+    }
+
+    private fun updatePreviewFullscreenStatus() {
+        if (!previewFullscreen || !::previewFullscreenStatus.isInitialized) return
+        val active = recording != null || continueRecording
+        previewFullscreenStatus.text = if (active) {
+            "● REC ${formatDurationSeconds(segmentDurationSeconds)}"
+        } else {
+            "FULL SCREEN PREVIEW"
+        }
+        previewFullscreenStatus.setTextColor(if (active) Color.rgb(255, 92, 92) else Color.WHITE)
     }
 
     private fun backgroundCameraReleaseDelayMs(): Long =
@@ -2396,6 +2498,7 @@ class MainActivity : ComponentActivity() {
                         !PowerRecordingSettings.isVolumeKeyStartEnabled(this))
                 )
         }
+        updatePreviewFullscreenStatus()
         updateBackgroundRecordButton()
         renderAudioStatus()
         updateLiveAccessButton()
