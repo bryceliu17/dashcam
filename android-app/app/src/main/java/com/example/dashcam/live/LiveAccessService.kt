@@ -57,10 +57,12 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class LiveAccessService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val frameUploading = AtomicBoolean(false)
+    private val cameraGeneration = AtomicInteger(0)
     private lateinit var cameraThread: HandlerThread
     private lateinit var cameraHandler: Handler
     private var monitorJob: Job? = null
@@ -91,6 +93,7 @@ class LiveAccessService : Service() {
     @Volatile private var torchEnabled = false
     @Volatile private var activeCameraHasFlash = false
     private var lastLegacyFrameAt = 0L
+    @Volatile private var cameraStartRunnable: Runnable? = null
 
     private val captureRunnable = object : Runnable {
         override fun run() {
@@ -327,10 +330,12 @@ class LiveAccessService : Service() {
         LiveAccessSettings.setStreaming(this, true)
         setError(null)
         broadcastState()
-        cameraHandler.postDelayed(cameraStart@{
+        val generation = cameraGeneration.incrementAndGet()
+        val startRunnable = Runnable cameraStart@{
+            if (!isCurrentCameraRequest(generation)) return@cameraStart
             try {
                 if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                    startLegacyStreaming()
+                    startLegacyStreaming(generation)
                     return@cameraStart
                 }
                 val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -362,17 +367,28 @@ class LiveAccessService : Service() {
                 val texture = SurfaceTexture(0).apply { setDefaultBufferSize(size.width, size.height) }
                 camera2SurfaceTexture = texture
                 camera2Surface = Surface(texture)
-                manager.openCamera(cameraId, cameraStateCallback, cameraHandler)
+                manager.openCamera(cameraId, cameraStateCallback(generation), cameraHandler)
             } catch (error: Exception) {
-                stopStreaming("Unable to open live camera: ${error.message.orEmpty()}")
+                if (generation == cameraGeneration.get()) {
+                    stopStreaming("Unable to open live camera: ${error.message.orEmpty()}")
+                }
             }
-        }, cameraReleaseDelayMs())
+        }
+        cameraStartRunnable = startRunnable
+        cameraHandler.postDelayed(startRunnable, cameraReleaseDelayMs())
     }
 
+    private fun isCurrentCameraRequest(generation: Int): Boolean =
+        generation == cameraGeneration.get() && liveRequested && streaming && cameraStarting
+
     @Suppress("DEPRECATION")
-    private fun startLegacyStreaming() {
+    private fun startLegacyStreaming(generation: Int) {
         val cameraId = findLegacyBackCameraId()
         val camera = Camera.open(cameraId)
+        if (!isCurrentCameraRequest(generation)) {
+            camera.release()
+            return
+        }
         legacyCamera = camera
         val parameters = camera.parameters
         activeCameraHasFlash = parameters.supportedFlashModes?.contains(Camera.Parameters.FLASH_MODE_TORCH) == true
@@ -399,8 +415,7 @@ class LiveAccessService : Service() {
         val bufferSize = size.width * size.height * ImageFormat.getBitsPerPixel(ImageFormat.NV21) / 8
         repeat(2) { camera.addCallbackBuffer(ByteArray(bufferSize)) }
         camera.setPreviewCallbackWithBuffer { data, source ->
-            if (!streaming) {
-                source.addCallbackBuffer(data)
+            if (generation != cameraGeneration.get() || !liveRequested || !streaming) {
                 return@setPreviewCallbackWithBuffer
             }
             val now = SystemClock.elapsedRealtime()
@@ -440,7 +455,24 @@ class LiveAccessService : Service() {
                 }
             }
         }
+        if (!isCurrentCameraRequest(generation)) {
+            camera.setPreviewCallbackWithBuffer(null)
+            legacyCamera = null
+            legacySurfaceTexture = null
+            texture.release()
+            camera.release()
+            return
+        }
         camera.startPreview()
+        if (!isCurrentCameraRequest(generation)) {
+            camera.setPreviewCallbackWithBuffer(null)
+            try { camera.stopPreview() } catch (_: Exception) { }
+            legacyCamera = null
+            legacySurfaceTexture = null
+            texture.release()
+            camera.release()
+            return
+        }
         cameraStarting = false
         streaming = true
         LiveAccessSettings.setStreaming(this, true)
@@ -460,8 +492,12 @@ class LiveAccessService : Service() {
         return 0
     }
 
-    private val cameraStateCallback = object : CameraDevice.StateCallback() {
+    private fun cameraStateCallback(generation: Int) = object : CameraDevice.StateCallback() {
         override fun onOpened(camera: CameraDevice) {
+            if (!isCurrentCameraRequest(generation)) {
+                camera.close()
+                return
+            }
             cameraDevice = camera
             val surface = imageReader?.surface ?: return stopStreaming("Live frame surface unavailable")
             val repeatingSurface = camera2Surface ?: return stopStreaming("Live preview surface unavailable")
@@ -470,8 +506,10 @@ class LiveAccessService : Service() {
                     listOf(surface, repeatingSurface),
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
-                            if (!cameraStarting) {
+                            if (!isCurrentCameraRequest(generation)) {
                                 session.close()
+                                camera.close()
+                                if (cameraDevice === camera) cameraDevice = null
                                 return
                             }
                             captureSession = session
@@ -493,24 +531,35 @@ class LiveAccessService : Service() {
                         }
 
                         override fun onConfigureFailed(session: CameraCaptureSession) {
-                            stopStreaming("Unable to configure live camera")
+                            session.close()
+                            if (generation == cameraGeneration.get()) {
+                                stopStreaming("Unable to configure live camera")
+                            }
                         }
                     },
                     cameraHandler
                 )
             } catch (error: Exception) {
-                stopStreaming("Unable to start live camera: ${error.message.orEmpty()}")
+                camera.close()
+                if (cameraDevice === camera) cameraDevice = null
+                if (generation == cameraGeneration.get()) {
+                    stopStreaming("Unable to start live camera: ${error.message.orEmpty()}")
+                }
             }
         }
 
         override fun onDisconnected(camera: CameraDevice) {
             camera.close()
-            stopStreaming("Live camera disconnected")
+            if (generation == cameraGeneration.get()) {
+                stopStreaming("Live camera disconnected")
+            }
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
             camera.close()
-            stopStreaming("Live camera error $error")
+            if (generation == cameraGeneration.get()) {
+                stopStreaming("Live camera error $error")
+            }
         }
     }
 
@@ -612,12 +661,15 @@ class LiveAccessService : Service() {
     }
 
     private fun stopStreaming(error: String? = null) {
+        cameraGeneration.incrementAndGet()
         cameraStarting = false
         streaming = false
         torchEnabled = false
         LiveAccessSettings.setStreaming(this, false)
         LiveAccessSettings.setError(this, error)
         if (::cameraHandler.isInitialized) {
+            cameraStartRunnable?.let(cameraHandler::removeCallbacks)
+            cameraStartRunnable = null
             cameraHandler.removeCallbacks(captureRunnable)
             cameraHandler.post {
                 try {
