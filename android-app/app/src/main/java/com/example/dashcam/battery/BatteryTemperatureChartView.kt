@@ -175,12 +175,16 @@ class BatteryTemperatureChartView(context: Context) : View(context) {
             )
             val detail = "Battery ${sample.batteryLevel}%   ${if (sample.isCharging) sample.chargingSource else "On battery"}"
             val electricalDetail = electricalDetail(sample)
+            val recordingDetail = recordingDetail(sample)
             paint.textSize = 12f * density
             val boxWidth = min(
-                max(max(paint.measureText(title), paint.measureText(detail)), paint.measureText(electricalDetail)) + 20f * density,
+                max(
+                    max(max(paint.measureText(title), paint.measureText(detail)), paint.measureText(electricalDetail)),
+                    paint.measureText(recordingDetail)
+                ) + 20f * density,
                 right - left
             )
-            val boxHeight = 66f * density
+            val boxHeight = 84f * density
             val boxLeft = (selectedX - boxWidth / 2).coerceIn(left, right - boxWidth)
             paint.color = Color.rgb(241, 245, 249)
             canvas.drawRoundRect(boxLeft, top, boxLeft + boxWidth, top + boxHeight, 6f * density, 6f * density, paint)
@@ -191,7 +195,15 @@ class BatteryTemperatureChartView(context: Context) : View(context) {
             canvas.drawText(detail, boxLeft + 10f * density, top + 38f * density, paint)
             paint.textSize = 9f * density
             canvas.drawText(electricalDetail, boxLeft + 10f * density, top + 55f * density, paint)
+            canvas.drawText(recordingDetail, boxLeft + 10f * density, top + 72f * density, paint)
         }
+    }
+
+    private fun recordingDetail(sample: BatteryTemperatureSample): String = when {
+        sample.videoRecordingActive && sample.audioRecordingActive -> "Video and audio recording"
+        sample.videoRecordingActive -> "Video recording"
+        sample.audioRecordingActive -> "Audio recording"
+        else -> "Idle"
     }
 
     private fun electricalDetail(sample: BatteryTemperatureSample): String {
