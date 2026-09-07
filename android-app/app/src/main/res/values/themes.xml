@@ -7,6 +7,9 @@
         <item name="android:windowLightStatusBar">true</item>
     </style>
     <style name="Theme.RecordingStartAlert" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowDisablePreview">true</item>

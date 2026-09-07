@@ -97,7 +97,7 @@ class BackgroundRecordingService : Service() {
 
         continueRecording = true
         stopAfterCurrentSegmentRequested = false
-        startAlertPending = PowerRecordingSettings.isPowerAutoStartAlertEnabled(this)
+        startAlertPending = true
         PowerRecordingSettings.setBackgroundRecordingActive(this, true)
         startForeground(NOTIFICATION_ID, buildNotification("Starting background recording"))
         broadcastState(true, 0, null)

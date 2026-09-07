@@ -40,6 +40,7 @@ class AudioRecordingService : Service() {
     private var finalFile: File? = null
     private var segmentStartMs = 0L
     private var recordingActive = false
+    private var startAlertPending = false
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val rotateRunnable = Runnable {
@@ -85,6 +86,7 @@ class AudioRecordingService : Service() {
         }
 
         recordingActive = true
+        startAlertPending = true
         PowerRecordingSettings.setAudioRecordingActive(this, true)
         acquireWakeLock()
         val directory = audioDirectory()
@@ -120,6 +122,10 @@ class AudioRecordingService : Service() {
             finalFile = destination
             segmentStartMs = startedAt
             recorder = nextRecorder
+            if (startAlertPending) {
+                startAlertPending = false
+                RecordingStartAlert.show(this)
+            }
             updateNotification("Recording ${destination.name}")
             broadcastState(true, 0, destination.name)
             mainHandler.removeCallbacks(rotateRunnable)
@@ -140,6 +146,7 @@ class AudioRecordingService : Service() {
             return
         }
         recordingActive = false
+        startAlertPending = false
         finishSegment(restart = false)
     }
 

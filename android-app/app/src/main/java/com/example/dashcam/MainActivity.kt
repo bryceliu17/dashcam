@@ -72,6 +72,9 @@ import com.example.dashcam.recording.AudioStoragePolicy
 import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
 import com.example.dashcam.recording.RecordingService
+import com.example.dashcam.recording.RecordingStartAlert
+import com.example.dashcam.recording.RecordingStartAlertMode
+import com.example.dashcam.recording.RecordingStartAlertSettings
 import com.example.dashcam.recording.StoragePolicy
 import com.example.dashcam.recording.StorageLimitSettings
 import com.example.dashcam.recording.VideoSegmentSettings
@@ -104,6 +107,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var audioRecordButton: Button
     private lateinit var liveAccessButton: Button
     private lateinit var recordingModeSpinner: Spinner
+    private lateinit var startAlertSpinner: Spinner
     private lateinit var segmentDurationSpinner: Spinner
     private lateinit var audioSegmentDurationSpinner: Spinner
     private var suppressSegmentDurationSelection = false
@@ -162,6 +166,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var audioPlaybackButton: ImageButton
     private var audioPlaybackSeeking = false
     private var stopAfterCurrentSegment = false
+    private var foregroundStartAlertPending = false
     private val timerRunnable = object : Runnable {
         override fun run() {
             updateRecordingStatus()
@@ -548,6 +553,33 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(recordingModeSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        root.addView(TextView(this).apply {
+            text = "Start Alert"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(14), 0, dp(5))
+        })
+        startAlertSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                RecordingStartAlertMode.entries.map { it.label }
+            )
+            setSelection(RecordingStartAlertSettings.mode(this@MainActivity).ordinal, false)
+            setBackgroundColor(Color.WHITE)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val selectedMode = RecordingStartAlertMode.entries.getOrNull(position) ?: return
+                    if (selectedMode != RecordingStartAlertSettings.mode(this@MainActivity)) {
+                        RecordingStartAlertSettings.setMode(this@MainActivity, selectedMode)
+                        toast("Start alert: ${selectedMode.label}")
+                    }
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(startAlertSpinner, LinearLayout.LayoutParams(-1, dp(52)))
         root.addView(TextView(this).apply {
             text = "Video Segment Length"
             textSize = 12f
@@ -1586,16 +1618,6 @@ class MainActivity : ComponentActivity() {
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, true)
                 PowerMonitorService.start(this)
             }
-            RecordingMode.PowerAutoAlert -> {
-                PowerRecordingSettings.setVolumeKeyStartEnabled(this, false)
-                PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
-                PowerRecordingSettings.setPowerAutoBackgroundEnabled(
-                    this,
-                    enabled = true,
-                    startAlertEnabled = true
-                )
-                PowerMonitorService.start(this)
-            }
             RecordingMode.VolumeVideoDoublePress -> {
                 PowerRecordingSettings.setPowerAutoBackgroundEnabled(this, false)
                 PowerRecordingSettings.setVolumeKeyAudioStartEnabled(this, false)
@@ -1637,6 +1659,12 @@ class MainActivity : ComponentActivity() {
             val position = currentRecordingMode().ordinal
             if (recordingModeSpinner.selectedItemPosition != position) {
                 recordingModeSpinner.setSelection(position, false)
+            }
+        }
+        if (::startAlertSpinner.isInitialized) {
+            val alertPosition = RecordingStartAlertSettings.mode(this).ordinal
+            if (startAlertSpinner.selectedItemPosition != alertPosition) {
+                startAlertSpinner.setSelection(alertPosition, false)
             }
         }
         if (::segmentDurationSpinner.isInitialized) {
@@ -1891,7 +1919,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun currentRecordingMode(): RecordingMode = when {
-        PowerRecordingSettings.isPowerAutoStartAlertEnabled(this) -> RecordingMode.PowerAutoAlert
         PowerRecordingSettings.isPowerAutoBackgroundEnabled(this) -> RecordingMode.PowerAuto
         PowerRecordingSettings.isVolumeKeyStartEnabled(this) -> RecordingMode.VolumeVideoDoublePress
         PowerRecordingSettings.isVolumeKeyAudioStartEnabled(this) -> RecordingMode.VolumeAudioDoublePress
@@ -1975,6 +2002,7 @@ class MainActivity : ComponentActivity() {
         overwrittenVideosSinceManualStart = 0
         stopAfterCurrentSegment = false
         continueRecording = true
+        foregroundStartAlertPending = true
         setRecordingPreference(true)
         renderRecording(true)
         mainHandler.removeCallbacks(timerRunnable)
@@ -2217,6 +2245,10 @@ class MainActivity : ComponentActivity() {
             is VideoRecordEvent.Start -> {
                 updateSegmentDuration(event)
                 runOnUiThread {
+                    if (foregroundStartAlertPending) {
+                        foregroundStartAlertPending = false
+                        RecordingStartAlert.show(this)
+                    }
                     renderRecording(true)
                     toast("Recording segment started")
                 }
@@ -2304,6 +2336,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopDashcam(reason: String) {
         continueRecording = false
+        foregroundStartAlertPending = false
         stopAfterCurrentSegment = false
         mainHandler.removeCallbacksAndMessages(null)
         val current = recording
@@ -2323,6 +2356,7 @@ class MainActivity : ComponentActivity() {
 
     private fun failRecording(message: String) {
         continueRecording = false
+        foregroundStartAlertPending = false
         stopAfterCurrentSegment = false
         mainHandler.removeCallbacks(timerRunnable)
         recording?.stop()
@@ -2671,7 +2705,6 @@ class MainActivity : ComponentActivity() {
     private enum class RecordingMode(val label: String) {
         Frontend("Frontend Recording"),
         PowerAuto("Power Auto Background"),
-        PowerAutoAlert("Power Auto + Start Alert"),
         VolumeVideoDoublePress("Volume Up Double-Press Video"),
         VolumeAudioDoublePress("Volume Up Double-Press Audio")
     }

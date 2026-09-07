@@ -16,21 +16,62 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 
+enum class RecordingStartAlertMode(
+    val label: String,
+    val playsSound: Boolean,
+    val showsScreen: Boolean
+) {
+    Silent("Silent", false, false),
+    SoundOnly("Sound only", true, false),
+    ScreenOnly("Screen only", false, true),
+    SoundAndScreen("Sound + screen", true, true)
+}
+
+object RecordingStartAlertSettings {
+    private const val PREFS = "dashcam_settings"
+    private const val KEY_MODE = "recording_start_alert_mode"
+    private const val LEGACY_POWER_AUTO_ALERT = "power_auto_start_alert"
+
+    fun mode(context: Context): RecordingStartAlertMode {
+        val preferences = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!preferences.contains(KEY_MODE)) {
+            return if (preferences.getBoolean(LEGACY_POWER_AUTO_ALERT, false)) {
+                RecordingStartAlertMode.SoundAndScreen
+            } else {
+                RecordingStartAlertMode.Silent
+            }
+        }
+        val saved = preferences.getString(KEY_MODE, null)
+        return RecordingStartAlertMode.entries.firstOrNull { it.name == saved }
+            ?: RecordingStartAlertMode.Silent
+    }
+
+    fun setMode(context: Context, mode: RecordingStartAlertMode) {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_MODE, mode.name)
+            .apply()
+    }
+}
+
 object RecordingStartAlert {
     private val handler = Handler(Looper.getMainLooper())
 
     fun show(context: Context) {
-        playTone()
-        context.applicationContext.startActivity(
-            Intent(context.applicationContext, RecordingStartAlertActivity::class.java).apply {
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_NO_HISTORY or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
-                        Intent.FLAG_ACTIVITY_NO_ANIMATION
-                )
-            }
-        )
+        val mode = RecordingStartAlertSettings.mode(context)
+        if (mode.playsSound) playTone()
+        if (mode.showsScreen) {
+            context.applicationContext.startActivity(
+                Intent(context.applicationContext, RecordingStartAlertActivity::class.java).apply {
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_NO_HISTORY or
+                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
+                            Intent.FLAG_ACTIVITY_NO_ANIMATION
+                    )
+                }
+            )
+        }
     }
 
     private fun playTone() {
