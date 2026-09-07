@@ -16,6 +16,8 @@ public sealed class DashcamDbContext(DbContextOptions<DashcamDbContext> options)
         video.Property(x => x.Filename).HasMaxLength(255).IsRequired();
         video.Property(x => x.OriginalFilename).HasMaxLength(255).IsRequired();
         video.Property(x => x.FilePath).HasMaxLength(2048).IsRequired();
+        video.Property(x => x.SourceDeviceId).HasMaxLength(128);
+        video.Property(x => x.SourceDeviceName).HasMaxLength(160);
         video.HasIndex(x => x.StartTime);
         video.HasIndex(x => x.Locked);
 
@@ -24,6 +26,8 @@ public sealed class DashcamDbContext(DbContextOptions<DashcamDbContext> options)
         audio.Property(x => x.Filename).HasMaxLength(255).IsRequired();
         audio.Property(x => x.OriginalFilename).HasMaxLength(255).IsRequired();
         audio.Property(x => x.FilePath).HasMaxLength(2048).IsRequired();
+        audio.Property(x => x.SourceDeviceId).HasMaxLength(128);
+        audio.Property(x => x.SourceDeviceName).HasMaxLength(160);
         audio.Property(x => x.TranscriptStatus).HasMaxLength(24).IsRequired();
         audio.Property(x => x.TranscriptLanguage).HasMaxLength(24).IsRequired();
         audio.Property(x => x.TranscriptModel).HasMaxLength(80).IsRequired();

@@ -6,6 +6,8 @@ public sealed class Video
     public required string Filename { get; set; }
     public required string OriginalFilename { get; set; }
     public required string FilePath { get; set; }
+    public string? SourceDeviceId { get; set; }
+    public string? SourceDeviceName { get; set; }
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
     public int DurationSeconds { get; set; }

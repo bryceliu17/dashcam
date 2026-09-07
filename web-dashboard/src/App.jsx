@@ -78,6 +78,45 @@ async function api(path, options) {
   return response.status === 204 ? null : response.json()
 }
 
+const recordingSourceKey = recording => recording?.sourceDeviceId
+  ? `device:${recording.sourceDeviceId}`
+  : recording?.sourceDeviceName
+    ? `name:${recording.sourceDeviceName.trim().toLowerCase()}`
+    : 'blank'
+
+function SourceSelect({ recording, devices, disabled, onChange }) {
+  const currentDevice = recording.sourceDeviceId
+    ? devices.find(device => device.deviceId === recording.sourceDeviceId)
+    : null
+  const name = recording.sourceDeviceName?.trim() || ''
+  const value = recording.sourceDeviceId
+    ? `device:${recording.sourceDeviceId}`
+    : name.toLowerCase() === 'unknown'
+      ? 'unknown'
+      : name
+        ? `name:${name}`
+        : 'blank'
+  const customValue = value.startsWith('name:') || (value.startsWith('device:') && !currentDevice)
+
+  const select = event => {
+    const selected = event.target.value
+    if (selected === 'blank') onChange({ sourceDeviceId: null, sourceDeviceName: null })
+    else if (selected === 'unknown') onChange({ sourceDeviceId: null, sourceDeviceName: 'Unknown' })
+    else if (selected.startsWith('device:')) {
+      const deviceId = selected.slice('device:'.length)
+      const device = devices.find(item => item.deviceId === deviceId)
+      onChange({ sourceDeviceId: deviceId, sourceDeviceName: device?.deviceName || recording.sourceDeviceName || 'Unknown' })
+    }
+  }
+
+  return <select className="source-select" value={value} onChange={select} disabled={disabled} aria-label="Recording source">
+    <option value="blank">No source</option>
+    <option value="unknown">Unknown</option>
+    {devices.map(device => <option key={device.deviceId} value={`device:${device.deviceId}`}>{device.deviceName}</option>)}
+    {customValue && <option value={value}>{name || recording.sourceDeviceId}</option>}
+  </select>
+}
+
 const supportedMigrationPath = path => {
   const normalized = path.toLowerCase()
   return normalized === 'dashcam.db' || normalized === 'dashcam.db-wal' || normalized === 'dashcam.db-shm' ||
@@ -1609,6 +1648,7 @@ export default function App() {
   const [rotatingVideoIds, setRotatingVideoIds] = useState(() => new Set())
   const [bulkRotation, setBulkRotation] = useState(90)
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [sourceSavingIds, setSourceSavingIds] = useState(() => new Set())
   const [videoExport, setVideoExport] = useState(null)
   const [audioExport, setAudioExport] = useState(null)
   const [storageSettingsOpen, setStorageSettingsOpen] = useState(false)
@@ -1896,7 +1936,8 @@ export default function App() {
     videos.forEach((video, index) => {
       sessionDurationSeconds += Number(video.durationSeconds) || 0
       const nextGapSeconds = index < videos.length - 1 ? videoGapSeconds(video, videos[index + 1]) : null
-      if (index === videos.length - 1 || nextGapSeconds > 10) {
+      const nextHasDifferentSource = index < videos.length - 1 && recordingSourceKey(video) !== recordingSourceKey(videos[index + 1])
+      if (index === videos.length - 1 || nextHasDifferentSource || nextGapSeconds > 10) {
         const sessionVideos = videos.slice(sessionStartIndex, index + 1).reverse()
         const gapDurationSeconds = sessionVideos.slice(0, -1).reduce((total, clip, clipIndex) =>
           total + (videoGapSeconds(sessionVideos[clipIndex + 1], clip) || 0), 0)
@@ -1932,7 +1973,8 @@ export default function App() {
     audio.forEach((recording, index) => {
       sessionDurationSeconds += Number(recording.durationSeconds) || 0
       const nextGapSeconds = index < audio.length - 1 ? videoGapSeconds(recording, audio[index + 1]) : null
-      if (index === audio.length - 1 || nextGapSeconds > 5) {
+      const nextHasDifferentSource = index < audio.length - 1 && recordingSourceKey(recording) !== recordingSourceKey(audio[index + 1])
+      if (index === audio.length - 1 || nextHasDifferentSource || nextGapSeconds > 5) {
         const sessionRecordings = audio.slice(sessionStartIndex, index + 1).reverse()
         const gapDurationSeconds = sessionRecordings.slice(0, -1).reduce((total, item, itemIndex) =>
           total + (videoGapSeconds(sessionRecordings[itemIndex + 1], item) || 0), 0)
@@ -2001,6 +2043,32 @@ export default function App() {
       setVideos(items => items.map(item => item.id === updated.id ? updated : item))
       if (selected?.id === updated.id) setSelected(updated)
     } catch (err) { setError(err.message) }
+  }
+
+  const updateRecordingSource = async (type, recording, source) => {
+    const key = `${type}:${recording.id}`
+    setSourceSavingIds(current => new Set(current).add(key))
+    try {
+      const updated = await api(`/api/${type}/${recording.id}/source`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(source),
+      })
+      if (type === 'videos') {
+        setVideos(items => items.map(item => item.id === updated.id ? updated : item))
+        if (selected?.id === updated.id) setSelected(updated)
+      } else {
+        setAudio(items => items.map(item => item.id === updated.id ? updated : item))
+        if (selectedAudio?.id === updated.id) setSelectedAudio(updated)
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSourceSavingIds(current => {
+        const next = new Set(current)
+        next.delete(key)
+        return next
+      })
+    }
   }
 
   const remove = async (video) => {
@@ -2512,18 +2580,19 @@ export default function App() {
           <button className="clear-selection" onClick={() => setSelectedIds(new Set())} disabled={bulkBusy}>Clear</button>
         </div>}
 
-        {archiveType === 'video' ? <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(videos, selectedVideoIds, setSelectedVideoIds)} aria-label="Select all visible videos" /></th><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Rotation</th><th>Status</th><th>Actions</th></tr></thead>
+        {archiveType === 'video' ? <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(videos, selectedVideoIds, setSelectedVideoIds)} aria-label="Select all visible videos" /></th><th>Recorded</th><th>File</th><th>Source</th><th>Duration</th><th>Size</th><th>Rotation</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>{videos.flatMap((video, index) => {
             const rows = []
             const sessionStart = videoSessions.starts.get(index)
             const sessionEnd = videoSessions.ends.get(index)
             if (groupVideoSessions && sessionStart) rows.push(
-              <tr className="session-header" key={`session-header-${video.id}`}><td colSpan="8"><div><span><SessionSelectionCheckbox items={sessionStart.videos} selectedIds={selectedVideoIds} setSelectedIds={setSelectedVideoIds} label={`Select all videos in session ${sessionStart.number}`} /><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'video' : 'videos'}</small></span><button type="button" onClick={() => setSelectedSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
+              <tr className="session-header" key={`session-header-${video.id}`}><td colSpan="9"><div><span><SessionSelectionCheckbox items={sessionStart.videos} selectedIds={selectedVideoIds} setSelectedIds={setSelectedVideoIds} label={`Select all videos in session ${sessionStart.number}`} /><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'video' : 'videos'} · {sessionStart.videos[0]?.sourceDeviceName || 'No source'}</small></span><button type="button" onClick={() => setSelectedSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
             )
             rows.push(<tr className={groupVideoSessions ? 'video-row grouped' : 'video-row'} key={video.id}>
               <td className="select-cell"><input type="checkbox" checked={selectedVideoIds.has(video.id)} onChange={() => toggleSelection(setSelectedVideoIds, video.id)} aria-label={`Select ${video.originalFilename || video.filename}`} /></td>
               <td>{formatDate(video.startTime)}</td>
               <td className="file"><span>{video.originalFilename || video.filename}</span><small>#{video.id}</small></td>
+              <td><SourceSelect recording={video} devices={devices} disabled={sourceSavingIds.has(`videos:${video.id}`)} onChange={source => updateRecordingSource('videos', video, source)} /></td>
               <td>{formatDuration(video.durationSeconds)}</td><td>{formatBytes(video.fileSizeBytes)}</td>
               <td>{video.playbackRotationDegrees || 0} deg</td>
               <td><span className={`pill ${video.locked ? 'locked' : ''}`}>{video.locked ? 'Locked' : 'Unlocked'}</span></td>
@@ -2546,24 +2615,25 @@ export default function App() {
               </div></td>
             </tr>)
             if (groupVideoSessions && sessionEnd) rows.push(
-              <tr className="session-summary" key={`session-summary-${video.id}`}><td colSpan="8"><span><i />Session {sessionEnd.number} total <strong>{formatTotalDuration(sessionEnd.durationSeconds)}</strong><i /></span></td></tr>
+              <tr className="session-summary" key={`session-summary-${video.id}`}><td colSpan="9"><span><i />Session {sessionEnd.number} total <strong>{formatTotalDuration(sessionEnd.durationSeconds)}</strong><i /></span></td></tr>
             )
             return rows
           })}</tbody></table>
           {!loading && videos.length === 0 && <div className="empty"><span>00:00</span><h3>No videos yet</h3><p>Videos will appear here after the phone completes its first upload.</p></div>}
           {loading && <div className="empty"><div className="spinner" /><p>Loading video library...</p></div>}
-        </div> : <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(audio, selectedAudioIds, setSelectedAudioIds)} aria-label="Select all visible audio recordings" /></th><th>Recorded</th><th>File</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
+        </div> : <div className="table-wrap"><table><thead><tr><th className="select-cell"><input type="checkbox" checked={allVisibleSelected} onChange={() => toggleAll(audio, selectedAudioIds, setSelectedAudioIds)} aria-label="Select all visible audio recordings" /></th><th>Recorded</th><th>File</th><th>Source</th><th>Duration</th><th>Size</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>{audio.flatMap((recording, index) => {
             const rows = []
             const sessionStart = audioSessions.starts.get(index)
             const sessionEnd = audioSessions.ends.get(index)
             if (groupAudioSessions && sessionStart) rows.push(
-              <tr className="session-header" key={`audio-session-header-${recording.id}`}><td colSpan="7"><div><span><SessionSelectionCheckbox items={sessionStart.recordings} selectedIds={selectedAudioIds} setSelectedIds={setSelectedAudioIds} label={`Select all recordings in session ${sessionStart.number}`} /><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'recording' : 'recordings'}</small></span><button type="button" onClick={() => setSelectedAudioSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
+              <tr className="session-header" key={`audio-session-header-${recording.id}`}><td colSpan="8"><div><span><SessionSelectionCheckbox items={sessionStart.recordings} selectedIds={selectedAudioIds} setSelectedIds={setSelectedAudioIds} label={`Select all recordings in session ${sessionStart.number}`} /><strong>Session {sessionStart.number}</strong><small>{sessionStart.count} {sessionStart.count === 1 ? 'recording' : 'recordings'} · {sessionStart.recordings[0]?.sourceDeviceName || 'No source'}</small></span><button type="button" onClick={() => setSelectedAudioSession(sessionStart)}><Icon name="play" />Play session</button></div></td></tr>
             )
             rows.push(<tr className={groupAudioSessions ? 'audio-row grouped' : 'audio-row'} key={recording.id}>
               <td className="select-cell"><input type="checkbox" checked={selectedAudioIds.has(recording.id)} onChange={() => toggleSelection(setSelectedAudioIds, recording.id)} aria-label={`Select ${recording.originalFilename || recording.filename}`} /></td>
               <td>{formatDate(recording.startTime)}</td>
               <td className="file"><span>{recording.originalFilename || recording.filename}</span><small>#{recording.id}</small></td>
+              <td><SourceSelect recording={recording} devices={devices} disabled={sourceSavingIds.has(`audio:${recording.id}`)} onChange={source => updateRecordingSource('audio', recording, source)} /></td>
               <td>{formatDuration(recording.durationSeconds)}</td><td>{formatBytes(recording.fileSizeBytes)}</td>
               <td><div className="recording-status"><span className={`pill ${recording.locked ? 'locked' : ''}`}>{recording.locked ? 'Locked' : 'Unlocked'}</span>
                 {recording.transcriptStatus && recording.transcriptStatus !== 'none' && <span className={`transcript-status ${recording.transcriptStatus}`} title={recording.transcriptError || ''}>{recording.transcriptStatus === 'ready' ? 'Transcript ready' : recording.transcriptStatus === 'failed' ? 'Transcript failed' : recording.transcriptStatus === 'queued' ? 'Transcript queued' : 'Transcribing'}</span>}
@@ -2582,7 +2652,7 @@ export default function App() {
               </div></td>
             </tr>)
             if (groupAudioSessions && sessionEnd) rows.push(
-              <tr className="session-summary" key={`audio-session-summary-${recording.id}`}><td colSpan="7"><span><i />Session {sessionEnd.number} total <strong>{formatTotalDuration(sessionEnd.durationSeconds)}</strong><i /></span></td></tr>
+              <tr className="session-summary" key={`audio-session-summary-${recording.id}`}><td colSpan="8"><span><i />Session {sessionEnd.number} total <strong>{formatTotalDuration(sessionEnd.durationSeconds)}</strong><i /></span></td></tr>
             )
             return rows
           })}</tbody></table>

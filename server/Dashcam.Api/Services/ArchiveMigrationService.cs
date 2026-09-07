@@ -421,7 +421,8 @@ public sealed class ArchiveMigrationService
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
             SELECT {Column("Filename", "''")}, {Column("OriginalFilename", "[Filename]")},
-                   {Column("FilePath", "''")}, {Column("StartTime", "''")}, {Column("EndTime", "[StartTime]")},
+                   {Column("FilePath", "''")}, {Column("SourceDeviceId", "NULL")}, {Column("SourceDeviceName", "NULL")},
+                   {Column("StartTime", "''")}, {Column("EndTime", "[StartTime]")},
                    {Column("DurationSeconds", "0")}, {Column("FileSizeBytes", "0")}, {Column("Locked", "0")},
                    {Column("PlaybackRotationDegrees", "0")}, {Column("UploadedAt", "[StartTime]")},
                    {Column("CreatedAt", "[StartTime]")}
@@ -435,23 +436,22 @@ public sealed class ArchiveMigrationService
             var filename = Path.GetFileName(reader.GetString(0));
             var originalFilename = Path.GetFileName(reader.GetString(1));
             var storedPath = reader.GetString(2);
-            var startTime = ReadDate(reader.GetValue(3));
-            var endTime = ReadDate(reader.GetValue(4));
-            var size = reader.GetInt64(6);
+            var sourceDeviceId = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var sourceDeviceName = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var startTime = ReadDate(reader.GetValue(5));
+            var endTime = ReadDate(reader.GetValue(6));
+            var size = reader.GetInt64(8);
             var sourcePath = ResolveSourceFile(mediaRoot, kind, storedPath, filename, startTime, size, fileIndex);
             records.Add(new(
-                kind,
-                filename,
-                originalFilename,
-                sourcePath,
+                kind, filename, originalFilename, sourcePath, sourceDeviceId, sourceDeviceName,
                 startTime,
                 endTime,
-                reader.GetInt32(5),
+                reader.GetInt32(7),
                 size,
-                reader.GetBoolean(7),
-                kind == "video" ? reader.GetInt32(8) : 0,
-                ReadDate(reader.GetValue(9)),
-                ReadDate(reader.GetValue(10))));
+                reader.GetBoolean(9),
+                kind == "video" ? reader.GetInt32(10) : 0,
+                ReadDate(reader.GetValue(11)),
+                ReadDate(reader.GetValue(12))));
         }
         return records;
     }
@@ -466,16 +466,20 @@ public sealed class ArchiveMigrationService
             if (!await TableExistsAsync(connection, table, token)) continue;
             var columns = await GetColumnsAsync(connection, table, token);
             var rotation = columns.Contains("PlaybackRotationDegrees") ? "PlaybackRotationDegrees" : "0";
+            var sourceDeviceId = columns.Contains("SourceDeviceId") ? "SourceDeviceId" : "NULL";
+            var sourceDeviceName = columns.Contains("SourceDeviceName") ? "SourceDeviceName" : "NULL";
             await using var command = connection.CreateCommand();
-            command.CommandText = $"SELECT Filename, OriginalFilename, FilePath, StartTime, EndTime, DurationSeconds, FileSizeBytes, Locked, {rotation}, UploadedAt, CreatedAt FROM {table}";
+            command.CommandText = $"SELECT Filename, OriginalFilename, FilePath, {sourceDeviceId}, {sourceDeviceName}, StartTime, EndTime, DurationSeconds, FileSizeBytes, Locked, {rotation}, UploadedAt, CreatedAt FROM {table}";
             await using var reader = await command.ExecuteReaderAsync(token);
             while (await reader.ReadAsync(token))
             {
                 var record = new MigrationRecord(
                     kind, reader.GetString(0), reader.GetString(1), reader.GetString(2),
-                    ReadDate(reader.GetValue(3)), ReadDate(reader.GetValue(4)), reader.GetInt32(5),
-                    reader.GetInt64(6), reader.GetBoolean(7), kind == "video" ? reader.GetInt32(8) : 0,
-                    ReadDate(reader.GetValue(9)), ReadDate(reader.GetValue(10)));
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    ReadDate(reader.GetValue(5)), ReadDate(reader.GetValue(6)), reader.GetInt32(7),
+                    reader.GetInt64(8), reader.GetBoolean(9), kind == "video" ? reader.GetInt32(10) : 0,
+                    ReadDate(reader.GetValue(11)), ReadDate(reader.GetValue(12)));
                 var key = DuplicateKey(record);
                 if (!result.TryGetValue(key, out var paths)) result[key] = paths = [];
                 paths.Add(record.SourcePath!);
@@ -492,8 +496,8 @@ public sealed class ArchiveMigrationService
         {
             command.CommandText = """
                 INSERT INTO Videos (Filename, OriginalFilename, FilePath, StartTime, EndTime, DurationSeconds,
-                    FileSizeBytes, Locked, PlaybackRotationDegrees, UploadedAt, CreatedAt)
-                VALUES ($filename, $original, $path, $start, $end, $duration, $size, $locked, $rotation, $uploaded, $created)
+                    FileSizeBytes, Locked, PlaybackRotationDegrees, UploadedAt, CreatedAt, SourceDeviceId, SourceDeviceName)
+                VALUES ($filename, $original, $path, $start, $end, $duration, $size, $locked, $rotation, $uploaded, $created, $sourceDeviceId, $sourceDeviceName)
                 """;
             command.Parameters.AddWithValue("$rotation", item.Record.PlaybackRotationDegrees);
         }
@@ -501,13 +505,15 @@ public sealed class ArchiveMigrationService
         {
             command.CommandText = """
                 INSERT INTO AudioRecordings (Filename, OriginalFilename, FilePath, StartTime, EndTime, DurationSeconds,
-                    FileSizeBytes, Locked, UploadedAt, CreatedAt)
-                VALUES ($filename, $original, $path, $start, $end, $duration, $size, $locked, $uploaded, $created)
+                    FileSizeBytes, Locked, UploadedAt, CreatedAt, SourceDeviceId, SourceDeviceName)
+                VALUES ($filename, $original, $path, $start, $end, $duration, $size, $locked, $uploaded, $created, $sourceDeviceId, $sourceDeviceName)
                 """;
         }
         command.Parameters.AddWithValue("$filename", item.Filename);
         command.Parameters.AddWithValue("$original", item.Record.OriginalFilename);
         command.Parameters.AddWithValue("$path", item.FinalPath);
+        command.Parameters.AddWithValue("$sourceDeviceId", (object?)item.Record.SourceDeviceId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$sourceDeviceName", (object?)item.Record.SourceDeviceName ?? DBNull.Value);
         command.Parameters.AddWithValue("$start", item.Record.StartTime);
         command.Parameters.AddWithValue("$end", item.Record.EndTime);
         command.Parameters.AddWithValue("$duration", item.Record.DurationSeconds);
@@ -829,6 +835,8 @@ public sealed class ArchiveMigrationService
         string Filename,
         string OriginalFilename,
         string? SourcePath,
+        string? SourceDeviceId,
+        string? SourceDeviceName,
         DateTime StartTime,
         DateTime EndTime,
         int DurationSeconds,

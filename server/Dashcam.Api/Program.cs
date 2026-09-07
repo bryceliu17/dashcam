@@ -99,6 +99,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await EnsurePlaybackRotationColumnAsync(db);
     await EnsureAudioTableAsync(db);
     await EnsureDeviceStatusTableAsync(db);
+    await EnsureRecordingSourceColumnsAsync(db);
     await db.Database.ExecuteSqlRawAsync(
         "UPDATE AudioRecordings SET TranscriptStatus = 'failed', TranscriptError = 'Transcription was interrupted by a server restart.' WHERE TranscriptStatus IN ('queued', 'processing')");
     await db.Database.ExecuteSqlRawAsync(
@@ -481,6 +482,9 @@ app.MapPost("/api/videos/upload", async (
     if (configuredSize != file.Length)
         return Results.BadRequest(new { error = "fileSizeBytes does not match the uploaded file." });
 
+    var sourceDeviceId = CleanNullableText(form["sourceDeviceId"].FirstOrDefault(), 128);
+    var sourceDeviceName = CleanNullableText(form["sourceDeviceName"].FirstOrDefault(), 160);
+
     var storageRoot = GetStorageRoot(configuration);
     var dateDirectory = Path.Combine(storageRoot, startTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
     Directory.CreateDirectory(dateDirectory);
@@ -501,6 +505,13 @@ app.MapPost("/api/videos/upload", async (
         if (duplicate is not null)
         {
             if (!TryDelete(finalPath)) throw new IOException("The duplicate upload could not be discarded.");
+            if (duplicate.SourceDeviceId is null && duplicate.SourceDeviceName is null &&
+                (sourceDeviceId is not null || sourceDeviceName is not null))
+            {
+                duplicate.SourceDeviceId = sourceDeviceId;
+                duplicate.SourceDeviceName = sourceDeviceName;
+                await db.SaveChangesAsync(cancellationToken);
+            }
             loggerFactory.CreateLogger("Dashcam.UploadDeduplication").LogInformation(
                 "Discarded duplicate video upload {OriginalFilename}; returning existing video {VideoId}",
                 originalFilename,
@@ -514,6 +525,8 @@ app.MapPost("/api/videos/upload", async (
             Filename = storedFilename,
             OriginalFilename = originalFilename,
             FilePath = finalPath,
+            SourceDeviceId = sourceDeviceId,
+            SourceDeviceName = sourceDeviceName,
             StartTime = startTime,
             EndTime = endTime,
             DurationSeconds = durationSeconds,
@@ -587,6 +600,9 @@ app.MapPost("/api/audio/upload", async (
     if (configuredSize != file.Length)
         return Results.BadRequest(new { error = "fileSizeBytes does not match the uploaded file." });
 
+    var sourceDeviceId = CleanNullableText(form["sourceDeviceId"].FirstOrDefault(), 128);
+    var sourceDeviceName = CleanNullableText(form["sourceDeviceName"].FirstOrDefault(), 160);
+
     var storageRoot = GetAudioStorageRoot(configuration);
     var dateDirectory = Path.Combine(storageRoot, startTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
     Directory.CreateDirectory(dateDirectory);
@@ -606,6 +622,13 @@ app.MapPost("/api/audio/upload", async (
         if (duplicate is not null)
         {
             if (!TryDelete(finalPath)) throw new IOException("The duplicate upload could not be discarded.");
+            if (duplicate.SourceDeviceId is null && duplicate.SourceDeviceName is null &&
+                (sourceDeviceId is not null || sourceDeviceName is not null))
+            {
+                duplicate.SourceDeviceId = sourceDeviceId;
+                duplicate.SourceDeviceName = sourceDeviceName;
+                await db.SaveChangesAsync(cancellationToken);
+            }
             loggerFactory.CreateLogger("Dashcam.UploadDeduplication").LogInformation(
                 "Discarded duplicate audio upload {OriginalFilename}; returning existing audio {AudioId}",
                 originalFilename,
@@ -619,6 +642,8 @@ app.MapPost("/api/audio/upload", async (
             Filename = storedFilename,
             OriginalFilename = originalFilename,
             FilePath = finalPath,
+            SourceDeviceId = sourceDeviceId,
+            SourceDeviceName = sourceDeviceName,
             StartTime = startTime,
             EndTime = endTime,
             DurationSeconds = durationSeconds,
@@ -913,6 +938,17 @@ app.MapPatch("/api/audio/{id:int}/lock", async (
     var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == id, token);
     if (audio is null) return Results.NotFound();
     audio.Locked = request.Locked;
+    await db.SaveChangesAsync(token);
+    return Results.Ok(ToAudioResponse(audio));
+});
+
+app.MapPatch("/api/audio/{id:int}/source", async (
+    int id, RecordingSourceRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var audio = await db.AudioRecordings.SingleOrDefaultAsync(x => x.Id == id, token);
+    if (audio is null) return Results.NotFound();
+    audio.SourceDeviceId = CleanNullableText(request.SourceDeviceId, 128);
+    audio.SourceDeviceName = CleanNullableText(request.SourceDeviceName, 160);
     await db.SaveChangesAsync(token);
     return Results.Ok(ToAudioResponse(audio));
 });
@@ -1386,6 +1422,17 @@ app.MapPatch("/api/videos/{id:int}/lock", async (
     return Results.Ok(ToResponse(video));
 });
 
+app.MapPatch("/api/videos/{id:int}/source", async (
+    int id, RecordingSourceRequest request, DashcamDbContext db, CancellationToken token) =>
+{
+    var video = await db.Videos.SingleOrDefaultAsync(x => x.Id == id, token);
+    if (video is null) return Results.NotFound();
+    video.SourceDeviceId = CleanNullableText(request.SourceDeviceId, 128);
+    video.SourceDeviceName = CleanNullableText(request.SourceDeviceName, 160);
+    await db.SaveChangesAsync(token);
+    return Results.Ok(ToResponse(video));
+});
+
 app.MapPatch("/api/videos/bulk/lock", async (
     BulkLockRequest request, DashcamDbContext db, CancellationToken token) =>
 {
@@ -1740,7 +1787,7 @@ static async Task<Video?> FindExactVideoDuplicateAsync(
     string uploadedPath,
     CancellationToken token)
 {
-    var candidates = await db.Videos.AsNoTracking()
+    var candidates = await db.Videos
         .Where(x => x.OriginalFilename == originalFilename &&
             x.StartTime == startTime &&
             x.EndTime == endTime &&
@@ -1761,7 +1808,7 @@ static async Task<AudioRecording?> FindExactAudioDuplicateAsync(
     string uploadedPath,
     CancellationToken token)
 {
-    var candidates = await db.AudioRecordings.AsNoTracking()
+    var candidates = await db.AudioRecordings
         .Where(x => x.OriginalFilename == originalFilename &&
             x.StartTime == startTime &&
             x.EndTime == endTime &&
@@ -2257,6 +2304,8 @@ static async Task EnsureAudioTableAsync(DashcamDbContext db)
             Filename TEXT NOT NULL,
             OriginalFilename TEXT NOT NULL,
             FilePath TEXT NOT NULL,
+            SourceDeviceId TEXT NULL,
+            SourceDeviceName TEXT NULL,
             StartTime TEXT NOT NULL,
             EndTime TEXT NOT NULL,
             DurationSeconds INTEGER NOT NULL,
@@ -2319,7 +2368,46 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
     await EnsureColumnAsync(db, "DeviceStatuses", "LastSeenTransport", "TEXT NOT NULL DEFAULT 'http'");
 }
 
-static async Task EnsureColumnAsync(DashcamDbContext db, string table, string column, string definition)
+static async Task EnsureRecordingSourceColumnsAsync(DashcamDbContext db)
+{
+    var videoIdAdded = await EnsureColumnAsync(db, "Videos", "SourceDeviceId", "TEXT NULL");
+    var videoNameAdded = await EnsureColumnAsync(db, "Videos", "SourceDeviceName", "TEXT NULL");
+    var audioIdAdded = await EnsureColumnAsync(db, "AudioRecordings", "SourceDeviceId", "TEXT NULL");
+    var audioNameAdded = await EnsureColumnAsync(db, "AudioRecordings", "SourceDeviceName", "TEXT NULL");
+
+    if (videoIdAdded || videoNameAdded)
+    {
+        await db.Database.ExecuteSqlRawAsync("""
+            UPDATE Videos
+            SET SourceDeviceId = (
+                    SELECT DeviceId FROM DeviceStatuses
+                    WHERE UPPER(Manufacturer) LIKE '%HUAWEI%'
+                    ORDER BY LastSeenAt DESC LIMIT 1),
+                SourceDeviceName = COALESCE((
+                    SELECT DeviceName FROM DeviceStatuses
+                    WHERE UPPER(Manufacturer) LIKE '%HUAWEI%'
+                    ORDER BY LastSeenAt DESC LIMIT 1), 'HUAWEI')
+            WHERE SourceDeviceId IS NULL AND SourceDeviceName IS NULL
+            """);
+    }
+    if (audioIdAdded || audioNameAdded)
+    {
+        await db.Database.ExecuteSqlRawAsync("""
+            UPDATE AudioRecordings
+            SET SourceDeviceId = (
+                    SELECT DeviceId FROM DeviceStatuses
+                    WHERE UPPER(Manufacturer) LIKE '%MEIZU%'
+                    ORDER BY LastSeenAt DESC LIMIT 1),
+                SourceDeviceName = COALESCE((
+                    SELECT DeviceName FROM DeviceStatuses
+                    WHERE UPPER(Manufacturer) LIKE '%MEIZU%'
+                    ORDER BY LastSeenAt DESC LIMIT 1), 'Meizu')
+            WHERE SourceDeviceId IS NULL AND SourceDeviceName IS NULL
+            """);
+    }
+}
+
+static async Task<bool> EnsureColumnAsync(DashcamDbContext db, string table, string column, string definition)
 {
     var connection = db.Database.GetDbConnection();
     if (connection.State != System.Data.ConnectionState.Open) await connection.OpenAsync();
@@ -2342,7 +2430,9 @@ static async Task EnsureColumnAsync(DashcamDbContext db, string table, string co
         await using var alter = connection.CreateCommand();
         alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
         await alter.ExecuteNonQueryAsync();
+        return true;
     }
+    return false;
 }
 
 static string CleanFileBase(string value)
@@ -2579,6 +2669,8 @@ static object ToResponse(Video video) => new
     video.Id,
     video.Filename,
     video.OriginalFilename,
+    video.SourceDeviceId,
+    video.SourceDeviceName,
     StartTime = AsUtc(video.StartTime),
     EndTime = AsUtc(video.EndTime),
     video.DurationSeconds,
@@ -2594,6 +2686,8 @@ static object ToAudioResponse(AudioRecording audio) => new
     audio.Id,
     audio.Filename,
     audio.OriginalFilename,
+    audio.SourceDeviceId,
+    audio.SourceDeviceName,
     StartTime = AsUtc(audio.StartTime),
     EndTime = AsUtc(audio.EndTime),
     audio.DurationSeconds,
@@ -2796,6 +2890,13 @@ static string CleanOptionalText(string? value, int maxLength)
     return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength];
 }
 
+static string? CleanNullableText(string? value, int maxLength)
+{
+    var cleaned = value?.Trim();
+    if (string.IsNullOrEmpty(cleaned)) return null;
+    return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength];
+}
+
 static string? NormalizeIpAddress(string? value)
 {
     if (!System.Net.IPAddress.TryParse(value?.Trim(), out var address)) return null;
@@ -2822,6 +2923,7 @@ public sealed record BulkIdsRequest(int[] Ids);
 public sealed record BulkLockRequest(int[] Ids, bool Locked);
 public sealed record BulkRotationRequest(int[] Ids, int PlaybackRotationDegrees);
 public sealed record RotationRequest(int PlaybackRotationDegrees);
+public sealed record RecordingSourceRequest(string? SourceDeviceId, string? SourceDeviceName);
 public sealed record ArchiveStorageSettingsRequest(double MaxVideoStorageGb, double MaxAudioStorageGb);
 public sealed record MobileUploadSettingsRequest(bool AcceptMobileUploads);
 public sealed record VideoExportRequest(int[] Ids, bool WithTimestamp, int TimezoneOffsetMinutes);
