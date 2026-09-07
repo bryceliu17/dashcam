@@ -19,6 +19,7 @@ import androidx.work.workDataOf
 import com.example.dashcam.data.DashcamDatabase
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.network.MobileUploadsDisabledException
+import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.recording.PowerRecordingSettings
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -187,6 +188,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             var uploadedAudio = 0
             var lastError: String? = null
             var uploadsBlocked = false
+            val sourceDeviceId = DeviceStatusReporter.deviceId(context)
+            val sourceDeviceName = DeviceStatusReporter.deviceName()
             withUploadWifiLock(context) {
                 for (video in videoCandidates) {
                     if (!manual && (
@@ -196,7 +199,12 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     ) break
                     if (videoDao.markUploading(video.id, System.currentTimeMillis()) == 0) continue
                     try {
-                        val serverId = client.upload(video, video.playbackRotationDegrees ?: defaultPlaybackRotation)
+                        val serverId = client.upload(
+                            video,
+                            video.playbackRotationDegrees ?: defaultPlaybackRotation,
+                            sourceDeviceId,
+                            sourceDeviceName
+                        )
                         videoDao.markUploaded(video.id, serverId, System.currentTimeMillis())
                         uploadedVideos += 1
                     } catch (cancelled: CancellationException) {
@@ -228,7 +236,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                     ) break
                     if (audioDao.markUploading(audio.id, System.currentTimeMillis()) == 0) continue
                     try {
-                        val serverId = client.uploadAudio(audio)
+                        val serverId = client.uploadAudio(audio, sourceDeviceId, sourceDeviceName)
                         audioDao.markUploaded(audio.id, serverId, System.currentTimeMillis())
                         uploadedAudio += 1
                     } catch (cancelled: CancellationException) {

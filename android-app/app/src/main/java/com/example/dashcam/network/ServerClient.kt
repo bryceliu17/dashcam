@@ -104,7 +104,12 @@ class ServerClient(private val baseUrl: String) {
         }
     }
 
-    fun upload(video: VideoEntity, playbackRotationDegrees: Int): Long {
+    fun upload(
+        video: VideoEntity,
+        playbackRotationDegrees: Int,
+        sourceDeviceId: String,
+        sourceDeviceName: String
+    ): Long {
         val file = File(video.localPath)
         require(file.exists()) { "Local file is missing: ${video.filename}" }
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -115,6 +120,8 @@ class ServerClient(private val baseUrl: String) {
             .addFormDataPart("durationSeconds", video.durationSeconds.toString())
             .addFormDataPart("fileSizeBytes", file.length().toString())
             .addFormDataPart("playbackRotationDegrees", playbackRotationDegrees.toString())
+            .addFormDataPart("sourceDeviceId", sourceDeviceId)
+            .addFormDataPart("sourceDeviceName", sourceDeviceName)
             .build()
         val request = Request.Builder().url("${cleanBase()}/api/videos/upload")
             .header("Connection", "close")
@@ -128,7 +135,7 @@ class ServerClient(private val baseUrl: String) {
         }
     }
 
-    fun uploadAudio(audio: AudioEntity): Long {
+    fun uploadAudio(audio: AudioEntity, sourceDeviceId: String, sourceDeviceName: String): Long {
         val file = File(audio.localPath)
         require(file.exists()) { "Local file is missing: ${audio.filename}" }
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -138,6 +145,8 @@ class ServerClient(private val baseUrl: String) {
             .addFormDataPart("endTime", formatUtc(audio.endTime))
             .addFormDataPart("durationSeconds", audio.durationSeconds.toString())
             .addFormDataPart("fileSizeBytes", file.length().toString())
+            .addFormDataPart("sourceDeviceId", sourceDeviceId)
+            .addFormDataPart("sourceDeviceName", sourceDeviceName)
             .build()
         val request = Request.Builder().url("${cleanBase()}/api/audio/upload")
             .header("Connection", "close")

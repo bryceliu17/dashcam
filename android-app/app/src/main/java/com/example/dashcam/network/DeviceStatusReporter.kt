@@ -117,6 +117,16 @@ object DeviceStatusReporter {
             .ifBlank { "${manufacturer.lowercase(Locale.US)}-${model.lowercase(Locale.US)}" }
     }
 
+    fun deviceName(): String {
+        val manufacturer = Build.MANUFACTURER.orEmpty()
+        val model = Build.MODEL.orEmpty()
+        return if (model.startsWith(manufacturer, ignoreCase = true)) {
+            model
+        } else {
+            listOf(manufacturer, model).filter { it.isNotBlank() }.joinToString(" ")
+        }.ifBlank { "Android device" }
+    }
+
     private fun readStatus(context: Context): DeviceHeartbeat {
         val battery = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
@@ -132,11 +142,7 @@ object DeviceStatusReporter {
         val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
         val manufacturer = Build.MANUFACTURER.orEmpty()
         val model = Build.MODEL.orEmpty()
-        val deviceName = if (model.startsWith(manufacturer, ignoreCase = true)) {
-            model
-        } else {
-            listOf(manufacturer, model).filter { it.isNotBlank() }.joinToString(" ")
-        }.ifBlank { "Android device" }
+        val deviceName = deviceName()
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
 
         return DeviceHeartbeat(
