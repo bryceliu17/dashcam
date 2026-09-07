@@ -53,6 +53,7 @@ class RecordingService : LifecycleService() {
     private var segmentFile: File? = null
     private var segmentDurationSeconds = 0
     private var stopMessage: String? = null
+    private var startAlertPending = false
     private var wakeLock: PowerManager.WakeLock? = null
 
     // Monitoring-camera mode: do not stop recording automatically when power is
@@ -83,6 +84,7 @@ class RecordingService : LifecycleService() {
                 //     stopSelf()
                 // } else {
                 continueRecording = true
+                startAlertPending = true
                 stopMessage = null
                 acquireWakeLock()
                 setRecordingPreference(true)
@@ -135,6 +137,10 @@ class RecordingService : LifecycleService() {
         when (event) {
             is VideoRecordEvent.Start -> {
                 updateSegmentDuration(event)
+                if (startAlertPending) {
+                    startAlertPending = false
+                    RecordingStartAlert.show(this)
+                }
                 broadcastState(true, "Recording segment started")
                 scheduleSegmentRotation()
             }
@@ -279,6 +285,7 @@ class RecordingService : LifecycleService() {
     }
 
     private fun finishService() {
+        startAlertPending = false
         setRecordingPreference(false)
         cameraProvider?.unbindAll()
         releaseWakeLock()
