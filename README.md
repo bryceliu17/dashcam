@@ -8,7 +8,7 @@ The phone remains the source of truth until an upload succeeds. A server outage 
 
 ### Maintained branches
 
-| Branch | Android support | Phone video archive | Camera implementation | Responsibility |
+| Branch | Android support | Default phone video archive | Camera implementation | Responsibility |
 |---|---:|---:|---|---|
 | `main` | Android 8.0 / API 26+ | 25 GiB | CameraX for foreground preview recording; Camera2 for background recording and Live Access | Maintained Android client, API, dashboard, Docker deployment, and documentation |
 | `android-5-compatible` | Android 5.0 / API 21+ | 5.5 GiB | Legacy `android.hardware.Camera` on Android 5/5.1; Camera2 only on newer systems | Maintained Android 5 client only |
@@ -46,6 +46,7 @@ Recording timestamps are saved in UTC. The dashboard displays them in the browse
 - Audio segment choices: 5, 10, 15, 30, or 60 minutes, unlimited, or a custom duration. Default: 30 minutes.
 - Video and audio are mutually exclusive.
 - Local video/audio lists support status, playback, seeking, rotation where applicable, locking, and deletion.
+- The launcher icon remains available, but the app is excluded from Android's recent-apps screen to reduce accidental swipe-away closures.
 
 #### Recording modes
 
@@ -53,24 +54,29 @@ Recording timestamps are saved in UTC. The dashboard displays them in the browse
 |---|---|
 | `Frontend Recording` | Normal preview plus manual foreground/background recording controls. |
 | `Power Auto Background` | Starts background video when charging begins. When power disconnects, the active segment finishes before recording stops. |
-| `Power Auto + Start Alert` | Power Auto plus an audible start alert and a brief screen-on “Recording started” notice. |
 | `Volume Up Double-Press Video` | Double-press Volume Up within 700 ms to start background video. |
 | `Volume Up Double-Press Audio` | Double-press Volume Up within 700 ms to start audio recording. |
 
 The volume-key modes require **Dashcam Volume Up Double-Press** to be enabled in Android Accessibility settings. Whether a fully screen-off phone delivers the key event depends on its firmware.
 
+Start alerts are configured independently of the recording mode. The choices are **Silent**, **Sound only**, **Screen only**, and **Sound + screen**. They apply to manual, power-triggered, and volume-key-triggered recording starts. A screen alert wakes the display briefly and shows “Recording started”.
+
 #### Phone storage and upload
 
-- `main` keeps up to **25 GiB** of local video; `android-5-compatible` keeps up to **5.5 GiB**.
-- Local audio has a separate **1.5 GiB** rotating archive.
+- The default local video limit is **25 GiB** on `main` and **5.5 GiB** on `android-5-compatible`. Local audio defaults to a separate **1.5 GiB** limit.
+- Video and audio limits can be changed on the phone. The suggested combined maximum is the bytes already used by local video/audio plus currently available space minus a 1 GiB reserve.
+- Saving lower limits does not delete existing files immediately; the new limits apply when later recording cleanup runs.
 - Before a new video segment, the app checks the video archive and remaining filesystem space. Low free space uses a 1 GiB trigger.
 - Automatic cleanup only removes the oldest unlocked local recordings. If required cleanup cannot remove an unlocked video, the next video segment does not start. Locked recordings are never selected.
 - Automatic uploads require validated Wi-Fi and a successful server health check. Finished recordings enter the WorkManager queue and failed items retry with backoff.
 - `Upload Now`, `Upload Video Only`, and `Upload Audio Only` are available for manual transfer. A recording becomes `Uploaded` only after server confirmation.
+- The server can pause all new phone uploads, including manual uploads. Pending phone files remain local and periodically recheck until the server accepts uploads again.
+- Uploads include the phone's stable device ID and display name so recordings retain their source device.
 
 #### Live Access, flashlight, and battery history
 
 - Enable **Live Access** on the phone to keep a control WebSocket available to the server.
+- While connected, WebSocket Ping/Pong keepalive and full device-status reporting each run every 60 seconds. Status uses the existing WebSocket; if it is unavailable, the same status report falls back to HTTP.
 - The dashboard can request a live camera only while the phone is not recording video or audio.
 - The live viewer supports rotation, fullscreen, and a phone flashlight control when the selected back camera exposes a torch.
 - The flashlight can be turned off manually. It is also turned off when live viewing is closed, the web page becomes hidden, the control connection closes, or the camera is released.
@@ -82,10 +88,12 @@ The volume-key modes require **Dashcam Volume Up Double-Press** to be enabled in
 - Separate video and audio archives with paging, date/lock filtering, and date availability indicators.
 - Range-enabled playback, playback rotation, original downloads, timestamp-overlay video downloads, and session downloads/exports.
 - Group nearby recordings into sessions for continuous video or audio playback while retaining individual controls.
+- Video and audio rows show their source device. The source can be changed to another known device, `Unknown`, or blank; session grouping never crosses a source-device boundary.
 - Bulk select, lock/unlock, rotate videos, and delete recordings.
 - Audio waveform generation and caching through `ffmpeg`.
 - One-click transcription for audio recordings up to 30 minutes, with language detection, timestamped `Speaker 1` / `Speaker 2` separation, transcript viewing, TXT download, and transcript deletion without deleting the audio. Docker runs `faster-whisper` plus optional local `pyannote.audio` speaker diarization, configured for CUDA by default.
 - Device list with online transport, battery/charging state, Live Access state, and battery-temperature history.
+- A server-wide control can accept or pause new phone uploads without deleting pending files from phones.
 - Dashboard storage settings for separate video/audio server limits. It offers a recommendation equal to 76% of the storage drive, preserving the current video/audio split.
 - Browser-assisted archive migration: select a previous archive folder containing `dashcam.db` plus `videos` and/or `audio`, upload it to the current server, and merge it through the migration workflow.
 
@@ -239,7 +247,7 @@ Switch back with `git switch main` before building or deploying the maintained s
 
 ### 维护中的分支
 
-| 分支 | Android 支持 | 手机视频归档上限 | 相机实现 | 负责范围 |
+| 分支 | Android 支持 | 手机视频默认归档上限 | 相机实现 | 负责范围 |
 |---|---:|---:|---|---|
 | `main` | Android 8.0 / API 26+ | 25 GiB | 前台预览录制使用 CameraX；后台录像和 Live Access 使用 Camera2 | 维护中的 Android 客户端、API、网页管理页、Docker 部署和文档 |
 | `android-5-compatible` | Android 5.0 / API 21+ | 5.5 GiB | Android 5/5.1 使用旧 `android.hardware.Camera`；更高版本系统才使用 Camera2 | 只维护 Android 5 客户端 |
@@ -277,6 +285,7 @@ React 管理页面（Docker 默认端口 8080）
 - 音频分段可选 5、10、15、30、60 分钟、无限或自定义；默认 30 分钟。
 - 视频和音频不能同时录制。
 - 本地视频/音频列表支持状态、播放、拖动、适用时的旋转、锁定和删除。
+- 桌面启动图标仍然保留，但 App 不显示在 Android 最近任务中，以减少清理其他 App 时被误划掉的概率。
 
 #### 录制模式
 
@@ -284,24 +293,29 @@ React 管理页面（Docker 默认端口 8080）
 |---|---|
 | `Frontend Recording` | 正常预览，以及手动前台/后台录像控制。 |
 | `Power Auto Background` | 开始充电时自动后台录像；断电后让当前分段录完再停止。 |
-| `Power Auto + Start Alert` | 与 Power Auto 相同，并在开始时发出提示音、短暂亮屏显示“Recording started”。 |
 | `Volume Up Double-Press Video` | 在 700 毫秒内双击音量加，开始后台录像。 |
 | `Volume Up Double-Press Audio` | 在 700 毫秒内双击音量加，开始音频录制。 |
 
 音量键模式需要在 Android 无障碍设置中启用 **Dashcam Volume Up Double-Press**。彻底熄屏时系统是否转发按键取决于手机固件。
 
+启动提醒独立于录制模式，可选 **Silent**、**Sound only**、**Screen only** 和 **Sound + screen**。它适用于手动启动、插电启动和音量键启动；屏幕提醒会短暂唤醒屏幕并显示“Recording started”。
+
 #### 手机本地容量与上传
 
-- `main` 的本地视频最多 **25 GiB**；`android-5-compatible` 最多 **5.5 GiB**。
-- 音频使用独立的 **1.5 GiB** 循环归档。
+- `main` 的本地视频默认上限是 **25 GiB**，`android-5-compatible` 默认是 **5.5 GiB**；音频使用独立的 **1.5 GiB** 默认上限。
+- 手机端可自行修改视频和音频上限。建议的合计最大值为：本地视频/音频已占用容量，加上当前可用空间，再预留 1 GiB。
+- 保存更低的上限不会立即删除现有文件；新设置会在以后触发录制清理时生效。
 - 每段新视频开始前会检查视频归档和文件系统剩余空间；剩余空间低于 1 GiB 会触发清理检查。
 - 自动清理只会删除最早、未锁定的本地录制；如果必须清理却没有可删除视频，下一段视频不会开始。锁定录制不会被自动清理。
 - 自动上传需要已验证的 Wi-Fi 和成功的服务器健康检查。录制完成后进入 WorkManager 队列；失败文件会按退避策略重试。
 - 可手动使用 `Upload Now`、`Upload Video Only`、`Upload Audio Only`。只有服务器确认后，文件才标记为 `Uploaded`。
+- 服务端可以暂停所有手机新上传，包括手动上传。Pending 文件会继续留在手机上，并定期检查服务端是否重新允许上传。
+- 上传时会附带手机的稳定设备 ID 和显示名称，使录制保留来源设备信息。
 
 #### Live Access、手电与电池温度历史
 
 - 在手机开启 **Live Access** 后，手机会保持一个供服务器控制的 WebSocket。
+- WebSocket 连接正常时，Ping/Pong 保活和完整设备状态上报都是每 60 秒一次；状态通过现有 WebSocket 发送，连接不可用时自动改用 HTTP。
 - 只有手机当前没有录制视频或音频时，网页才能请求直播画面。
 - 直播窗口支持旋转、全屏；所选后摄支持手电时可直接控制手机手电。
 - 手电可手动关闭；关闭直播窗口、网页变为不可见、控制连接断开或相机释放时，都会自动关闭。
@@ -313,10 +327,12 @@ React 管理页面（Docker 默认端口 8080）
 - 视频和音频独立归档，支持分页、日期/锁定筛选和有录制日期提示。
 - 支持 Range 播放、播放旋转、原视频下载、带时间戳的视频下载，以及 session 下载/导出。
 - 将相邻录制分组为 session 连续播放，同时保留单个文件控制。
+- 视频和音频会显示来源设备；网页可改成其他已知设备、`Unknown` 或留空，session 不会跨不同来源设备分组。
 - 支持多选、批量锁定/解锁、批量旋转视频和批量删除。
 - 使用 `ffmpeg` 生成和缓存音频波形。
 - 最长 30 分钟的音频可以一键转文字，支持语言识别、带时间的 `Speaker 1` / `Speaker 2` 说话人分离、查看文字稿、下载 TXT 和单独删除文字稿而不删除音频。Docker 默认使用 CUDA 运行 `faster-whisper`，并可在本机使用 `pyannote.audio` 进行说话人分离。
 - 设备列表显示在线连接方式、电量/充电状态、Live Access 状态和电池温度历史。
+- 服务端提供全局开关，可暂停或恢复手机新上传，同时不会删除手机中的 Pending 文件。
 - 网页可分别设置服务端视频/音频容量，并根据所在存储盘给出 76% 的推荐总容量，保持当前视频/音频比例。
 - 支持浏览器辅助归档迁移：选择旧归档文件夹（包含 `dashcam.db` 和 `videos`、`audio`），上传到当前服务端并通过迁移流程合并。
 
