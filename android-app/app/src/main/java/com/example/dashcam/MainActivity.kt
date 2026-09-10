@@ -64,6 +64,8 @@ import com.example.dashcam.live.LiveAccessSettings
 import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.recording.BackgroundRecordingService
+import com.example.dashcam.recording.BackgroundVideoQuality
+import com.example.dashcam.recording.BackgroundVideoQualitySettings
 import com.example.dashcam.recording.AudioRecordingService
 import com.example.dashcam.recording.AudioSegmentSettings
 import com.example.dashcam.recording.AudioStoragePolicy
@@ -106,6 +108,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var liveAccessButton: Button
     private lateinit var recordingModeSpinner: Spinner
     private lateinit var startAlertSpinner: Spinner
+    private lateinit var backgroundVideoQualitySpinner: Spinner
     private lateinit var segmentDurationSpinner: Spinner
     private lateinit var audioSegmentDurationSpinner: Spinner
     private var suppressSegmentDurationSelection = false
@@ -575,6 +578,33 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(startAlertSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        root.addView(TextView(this).apply {
+            text = "Background Video Quality"
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(14), 0, dp(5))
+        })
+        backgroundVideoQualitySpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                BackgroundVideoQuality.entries.map { it.label }
+            )
+            setSelection(BackgroundVideoQualitySettings.quality(this@MainActivity).ordinal, false)
+            setBackgroundColor(Color.WHITE)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val selectedQuality = BackgroundVideoQuality.entries.getOrNull(position) ?: return
+                    if (selectedQuality != BackgroundVideoQualitySettings.quality(this@MainActivity)) {
+                        BackgroundVideoQualitySettings.setQuality(this@MainActivity, selectedQuality)
+                        toast("Background video quality: ${selectedQuality.label}")
+                    }
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        root.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
         root.addView(TextView(this).apply {
             text = "Video Segment Length"
             textSize = 12f
@@ -1685,6 +1715,13 @@ class MainActivity : ComponentActivity() {
             val alertPosition = RecordingStartAlertSettings.mode(this).ordinal
             if (startAlertSpinner.selectedItemPosition != alertPosition) {
                 startAlertSpinner.setSelection(alertPosition, false)
+            }
+        }
+        if (::backgroundVideoQualitySpinner.isInitialized) {
+            backgroundVideoQualitySpinner.isEnabled = !liveStreaming && !backgroundRecordingActive
+            val qualityPosition = BackgroundVideoQualitySettings.quality(this).ordinal
+            if (backgroundVideoQualitySpinner.selectedItemPosition != qualityPosition) {
+                backgroundVideoQualitySpinner.setSelection(qualityPosition, false)
             }
         }
         if (::segmentDurationSpinner.isInitialized) {

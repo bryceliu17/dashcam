@@ -265,11 +265,7 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun createRecorder(file: File): MediaRecorder {
-        val profile = if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_720P)) {
-            CamcorderProfile.get(CamcorderProfile.QUALITY_720P)
-        } else {
-            CamcorderProfile.get(CamcorderProfile.QUALITY_480P)
-        }
+        val profile = selectedCamcorderProfile()
 
         return MediaRecorder().apply {
             val canRecordAudio = ContextCompat.checkSelfPermission(
@@ -296,11 +292,7 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun createLegacyRecorder(file: File, camera: Camera): MediaRecorder {
-        val profile = if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_720P)) {
-            CamcorderProfile.get(CamcorderProfile.QUALITY_720P)
-        } else {
-            CamcorderProfile.get(CamcorderProfile.QUALITY_480P)
-        }
+        val profile = selectedCamcorderProfile()
         legacySurfaceTexture?.release()
         legacySurface?.release()
         legacySurfaceTexture = SurfaceTexture(0).apply {
@@ -338,6 +330,19 @@ class BackgroundRecordingService : Service() {
             setVideoFrameRate(profile.videoFrameRate)
             setVideoSize(profile.videoFrameWidth, profile.videoFrameHeight)
             setPreviewDisplay(legacySurface)
+        }
+    }
+
+    private fun selectedCamcorderProfile(): CamcorderProfile {
+        return if (
+            BackgroundVideoQualitySettings.quality(this) == BackgroundVideoQuality.High &&
+            CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_1080P)
+        ) {
+            CamcorderProfile.get(CamcorderProfile.QUALITY_1080P)
+        } else if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_720P)) {
+            CamcorderProfile.get(CamcorderProfile.QUALITY_720P)
+        } else {
+            CamcorderProfile.get(CamcorderProfile.QUALITY_480P)
         }
     }
 
