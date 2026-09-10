@@ -198,7 +198,12 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun createRecorder(file: File): MediaRecorder {
-        val profile = if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_720P)) {
+        val profile = if (
+            BackgroundVideoQualitySettings.quality(this) == BackgroundVideoQuality.High &&
+            CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_1080P)
+        ) {
+            CamcorderProfile.get(CamcorderProfile.QUALITY_1080P)
+        } else if (CamcorderProfile.hasProfile(CamcorderProfile.QUALITY_720P)) {
             CamcorderProfile.get(CamcorderProfile.QUALITY_720P)
         } else {
             CamcorderProfile.get(CamcorderProfile.QUALITY_480P)

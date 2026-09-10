@@ -42,6 +42,7 @@ Recording timestamps are saved in UTC. The dashboard displays them in the browse
 
 - Foreground video recording with an aspect-correct preview.
 - Manual background recording through a foreground service, including screen-off recording subject to device battery/camera policy.
+- Background video quality can be set to **Balanced (720p)** or **High (1080p)**. High mode falls back to 720p when the selected camera does not expose a 1080p camcorder profile; foreground CameraX recording keeps its existing automatic quality selection.
 - Video segment choices: 1, 3, 5, or 10 minutes, unlimited, or a custom duration. Default: 5 minutes.
 - Audio segment choices: 5, 10, 15, 30, or 60 minutes, unlimited, or a custom duration. Default: 30 minutes.
 - Video and audio are mutually exclusive.
@@ -281,6 +282,7 @@ React 管理页面（Docker 默认端口 8080）
 
 - 前台视频录制带有比例正确的实时预览。
 - 后台录像由前台服务运行；在熄屏时也可录制，但仍受手机厂商的相机和省电策略影响。
+- 后台录像画质可选 **Balanced (720p)** 或 **High (1080p)**；如果当前相机不提供 1080p 录像配置，高画质模式会自动退回 720p。前台 CameraX 录像仍保留原来的自动画质选择。
 - 视频分段可选 1、3、5、10 分钟、无限或自定义；默认 5 分钟。
 - 音频分段可选 5、10、15、30、60 分钟、无限或自定义；默认 30 分钟。
 - 视频和音频不能同时录制。
