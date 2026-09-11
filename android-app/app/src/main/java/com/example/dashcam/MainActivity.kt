@@ -556,15 +556,10 @@ class MainActivity : ComponentActivity() {
         }
         backgroundControls.addView(backgroundRecordButton, LinearLayout.LayoutParams(-1, -1))
         root.addView(backgroundControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
-        val audioControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         audioRecordButton = actionButton(if (audioRecordingActive) "Stop Audio" else "Start Audio") {
             if (audioRecordingActive) stopAudioRecording() else requestAudioStart()
         }
-        audioControls.addView(audioRecordButton, weighted())
-        audioControls.addView(actionButton("Upload Now") {
-            startManualUpload()
-        }, weighted().apply { marginStart = dp(8) })
-        root.addView(audioControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
+        root.addView(audioRecordButton, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         liveAccessButton = actionButton("Live Access") {
             toggleLiveAccess()
         }
@@ -704,6 +699,9 @@ class MainActivity : ComponentActivity() {
             buildUi()
         }, LinearLayout.LayoutParams(-1, -1))
         root.addView(autoUploadControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(actionButton("Upload Now") {
+            startManualUpload()
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val uploadTypeControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         uploadTypeControls.addView(actionButton("Upload Audio Only") {
             startManualAudioUpload()
