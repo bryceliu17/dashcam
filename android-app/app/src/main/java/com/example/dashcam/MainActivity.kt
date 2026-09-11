@@ -582,7 +582,9 @@ class MainActivity : ComponentActivity() {
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     val selectedMode = RecordingMode.entries.getOrNull(position) ?: return
-                    if (selectedMode != currentRecordingMode()) setRecordingMode(selectedMode)
+                    if (selectedMode != currentRecordingMode()) {
+                        keepHomeScrollPosition { setRecordingMode(selectedMode) }
+                    }
                 }
 
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -607,8 +609,10 @@ class MainActivity : ComponentActivity() {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     val selectedMode = RecordingStartAlertMode.entries.getOrNull(position) ?: return
                     if (selectedMode != RecordingStartAlertSettings.mode(this@MainActivity)) {
-                        RecordingStartAlertSettings.setMode(this@MainActivity, selectedMode)
-                        toast("Start alert: ${selectedMode.label}")
+                        keepHomeScrollPosition {
+                            RecordingStartAlertSettings.setMode(this@MainActivity, selectedMode)
+                            toast("Start alert: ${selectedMode.label}")
+                        }
                     }
                 }
 
@@ -634,8 +638,10 @@ class MainActivity : ComponentActivity() {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     val selectedQuality = BackgroundVideoQuality.entries.getOrNull(position) ?: return
                     if (selectedQuality != BackgroundVideoQualitySettings.quality(this@MainActivity)) {
-                        BackgroundVideoQualitySettings.setQuality(this@MainActivity, selectedQuality)
-                        toast("Background video quality: ${selectedQuality.label}")
+                        keepHomeScrollPosition {
+                            BackgroundVideoQualitySettings.setQuality(this@MainActivity, selectedQuality)
+                            toast("Background video quality: ${selectedQuality.label}")
+                        }
                     }
                 }
 
@@ -655,7 +661,7 @@ class MainActivity : ComponentActivity() {
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     if (suppressSegmentDurationSelection) return
-                    selectSegmentDuration(position)
+                    keepHomeScrollPosition { selectSegmentDuration(position) }
                 }
 
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -674,7 +680,7 @@ class MainActivity : ComponentActivity() {
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     if (suppressAudioSegmentDurationSelection) return
-                    selectAudioSegmentDuration(position)
+                    keepHomeScrollPosition { selectAudioSegmentDuration(position) }
                 }
 
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
@@ -808,6 +814,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showLocalVideos() {
+        if (showingVideoList && ::videoList.isInitialized) rememberVideoListScroll()
         showingVideoList = true
         showingVideoManager = false
         returnToVideoListAfterManager = false
@@ -1283,6 +1290,14 @@ class MainActivity : ComponentActivity() {
         videoListFirstVisiblePosition = videoList.firstVisiblePosition
         videoListTopOffset = videoList.getChildAt(0)?.top ?: 0
         restoreVideoListScroll = true
+    }
+
+    private fun keepHomeScrollPosition(action: () -> Unit) {
+        val scrollY = if (::homeScroll.isInitialized) homeScroll.scrollY else 0
+        action()
+        if (::homeScroll.isInitialized) {
+            homeScroll.post { homeScroll.scrollTo(0, scrollY) }
+        }
     }
 
     private fun restoreVideoListScrollIfNeeded() {
@@ -2472,8 +2487,10 @@ class MainActivity : ComponentActivity() {
             DashcamDatabase.get(this@MainActivity).videoDao().observeAll().collectLatest { items ->
                 videos = items
                 if (::adapter.isInitialized && showingVideoList) {
+                    rememberVideoListScroll()
                     adapter.clear()
                     adapter.addAll(items)
+                    restoreVideoListScrollIfNeeded()
                 }
                 if (::storageStatus.isInitialized) {
                     updateStorageStatus()
