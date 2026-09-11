@@ -699,10 +699,12 @@ class MainActivity : ComponentActivity() {
         autoUploadControls.addView(actionButton(
             if (UploadWorker.isAutomaticUploadEnabled(this)) "Auto Upload: On" else "Auto Upload: Off"
         ) {
-            val enabled = !UploadWorker.isAutomaticUploadEnabled(this)
-            UploadWorker.setAutomaticUploadEnabled(this, enabled)
-            toast("Automatic upload ${if (enabled) "enabled" else "disabled"}")
-            buildUi()
+            keepHomeScrollPosition {
+                val enabled = !UploadWorker.isAutomaticUploadEnabled(this)
+                UploadWorker.setAutomaticUploadEnabled(this, enabled)
+                toast("Automatic upload ${if (enabled) "enabled" else "disabled"}")
+                buildUi()
+            }
         }, LinearLayout.LayoutParams(-1, -1))
         root.addView(autoUploadControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         root.addView(actionButton("Upload Now") {
