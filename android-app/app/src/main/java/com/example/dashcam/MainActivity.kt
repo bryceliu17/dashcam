@@ -157,6 +157,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var previewContainer: FrameLayout
     private lateinit var previewFullscreenStatus: TextView
+    private lateinit var compactStatusBar: TextView
     private lateinit var homeScroll: ScrollView
     private lateinit var homeRoot: LinearLayout
     private var previewAvailable = false
@@ -209,6 +210,8 @@ class MainActivity : ComponentActivity() {
     private var audioPlaybackSeeking = false
     private var stopAfterCurrentSegment = false
     private var foregroundStartAlertPending = false
+    private var recordingSettingsExpanded = false
+    private var serverOnline: Boolean? = null
     private val timerRunnable = object : Runnable {
         override fun run() {
             updateRecordingStatus()
@@ -465,6 +468,14 @@ class MainActivity : ComponentActivity() {
         updateStorageStatus()
         updateAudioStorageStatus()
 
+        compactStatusBar = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(31, 41, 55))
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            maxLines = 2
+        }
+
         previewView = PreviewView(this).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FIT_CENTER
@@ -497,7 +508,11 @@ class MainActivity : ComponentActivity() {
         homeRoot = root
         updatePreviewAvailability()
 
-        root.addView(actionButton("Storage Limits") {
+        val settingsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (recordingSettingsExpanded) View.VISIBLE else View.GONE
+        }
+        settingsContainer.addView(actionButton("Storage Limits") {
             showStorageLimitDialog()
         }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
         root.addView(storageStatus)
@@ -539,7 +554,7 @@ class MainActivity : ComponentActivity() {
                 buildUi()
             }
         }, LinearLayout.LayoutParams(dp(86), dp(52)).apply { marginStart = dp(8) })
-        root.addView(serverUrlRow, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(18) })
+        settingsContainer.addView(serverUrlRow, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
 
         val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         previewRecordButton = actionButton(if (recording != null || continueRecording) "Stop Dashcam" else "Start Dashcam") {
@@ -570,7 +585,16 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(liveAccessButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         updateLiveAccessButton()
-        root.addView(TextView(this).apply {
+        val settingsToggle = actionButton(
+            if (recordingSettingsExpanded) "Hide Recording Settings" else "Show Recording Settings"
+        ) {
+            recordingSettingsExpanded = !recordingSettingsExpanded
+            settingsContainer.visibility = if (recordingSettingsExpanded) View.VISIBLE else View.GONE
+            (it as Button).text = if (recordingSettingsExpanded) "Hide Recording Settings" else "Show Recording Settings"
+        }
+        root.addView(settingsToggle, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(settingsContainer, LinearLayout.LayoutParams(-1, -2))
+        settingsContainer.addView(TextView(this).apply {
             text = "Recording Mode"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -595,8 +619,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(recordingModeSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        settingsContainer.addView(recordingModeSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(TextView(this).apply {
             text = "Start Alert"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -624,8 +648,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(startAlertSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        settingsContainer.addView(startAlertSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(TextView(this).apply {
             text = "Background Video Quality"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -653,8 +677,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        settingsContainer.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(TextView(this).apply {
             text = "Video Segment Length"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -672,8 +696,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        settingsContainer.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(TextView(this).apply {
             text = "Audio Segment Length"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -691,7 +715,7 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Local Audio") {
             showLocalAudio()
@@ -727,7 +751,13 @@ class MainActivity : ComponentActivity() {
             showBatteryTemperatureHistory(24)
         }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         scroll.addView(root)
-        setContentView(scroll)
+        val screen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(244, 244, 240))
+            addView(compactStatusBar, LinearLayout.LayoutParams(-1, -2))
+            addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        setContentView(screen)
         refreshHomeStatus()
     }
 
@@ -2171,6 +2201,7 @@ class MainActivity : ComponentActivity() {
     private fun enterPreviewFullscreen() {
         if (!previewAvailable || !::homeRoot.isInitialized || !::previewContainer.isInitialized) return
         previewFullscreen = true
+        if (::compactStatusBar.isInitialized) compactStatusBar.visibility = View.GONE
         homeChildVisibility.clear()
         for (index in 0 until homeRoot.childCount) {
             val child = homeRoot.getChildAt(index)
@@ -2204,6 +2235,7 @@ class MainActivity : ComponentActivity() {
         previewContainer.layoutParams = normalPreviewLayoutParams()
         previewFullscreenStatus.visibility = View.GONE
         homeScroll.isFillViewport = false
+        if (::compactStatusBar.isInitialized) compactStatusBar.visibility = View.VISIBLE
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         return true
     }
@@ -2473,6 +2505,7 @@ class MainActivity : ComponentActivity() {
                 if (::storageStatus.isInitialized) {
                     updateStorageStatus()
                 }
+                updateCompactStatusBar()
             }
         }
     }
@@ -2493,6 +2526,7 @@ class MainActivity : ComponentActivity() {
             DashcamDatabase.get(this@MainActivity).audioDao().observeAll().collectLatest { items ->
                 audioRecords = items
                 updateAudioStorageStatus()
+                updateCompactStatusBar()
             }
         }
     }
@@ -2534,11 +2568,15 @@ class MainActivity : ComponentActivity() {
     private fun checkServer(showResult: Boolean = false) {
         saveServerUrl()
         serverStatus.text = "Home Server: Checking..."
+        serverOnline = null
+        updateCompactStatusBar()
         lifecycleScope.launch {
             val online = withContext(Dispatchers.IO) {
                 DeviceStatusReporter.reportNow(this@MainActivity) != null
             }
+            serverOnline = online
             serverStatus.text = "Home Server: ${if (online) "Online" else "Offline"}"
+            updateCompactStatusBar()
             if (showResult) toast(if (online) "Upload queued (Wi-Fi only)" else "Server unreachable; videos kept for retry")
         }
     }
@@ -2683,12 +2721,37 @@ class MainActivity : ComponentActivity() {
         renderAudioStatus()
         updateLiveAccessButton()
         updateModeButtons()
+        updateCompactStatusBar()
     }
 
     private fun renderCharging(intent: Intent?) {
         if (!::chargingStatus.isInitialized) return
         val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         chargingStatus.text = "Power: ${if (status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL) "Charging" else "Not Charging"}"
+        updateCompactStatusBar(intent)
+    }
+
+    private fun updateCompactStatusBar(batteryIntent: Intent? = currentBatteryIntent()) {
+        if (!::compactStatusBar.isInitialized) return
+        val video = when {
+            recording != null || continueRecording -> "Video: REC"
+            backgroundRecordingActive -> "Video: BG REC"
+            else -> "Video: Idle"
+        }
+        val audio = if (audioRecordingActive) "Audio: REC" else "Audio: Idle"
+        val batteryStatus = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = batteryStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
+            batteryStatus == BatteryManager.BATTERY_STATUS_FULL
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)?.takeIf { it >= 0 }
+        val power = if (charging) "Charging" else "Battery"
+        val server = when (serverOnline) {
+            true -> "Online"
+            false -> "Offline"
+            null -> "Checking"
+        }
+        val pending = videos.count { it.uploadStatus != UploadStatus.Uploaded } +
+            audioRecords.count { it.uploadStatus != UploadStatus.Uploaded }
+        compactStatusBar.text = "$video   •   $audio\n$power${level?.let { " $it%" }.orEmpty()}   •   Server: $server   •   Pending: $pending"
     }
     private fun currentBatteryIntent(): Intent? =
         registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
