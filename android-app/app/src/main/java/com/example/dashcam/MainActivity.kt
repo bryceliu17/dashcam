@@ -21,8 +21,10 @@ import android.provider.Settings
 import android.text.InputType
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -91,6 +93,43 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.abs
+
+private class ScrollFriendlySpinner(context: Context) : Spinner(context) {
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downX = 0f
+    private var downY = 0f
+    private var verticalDrag = false
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                verticalDrag = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val verticalDistance = abs(event.y - downY)
+                val horizontalDistance = abs(event.x - downX)
+                if (verticalDistance > touchSlop && verticalDistance > horizontalDistance) {
+                    verticalDrag = true
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                }
+            }
+            MotionEvent.ACTION_UP -> if (verticalDrag) {
+                val cancelEvent = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                super.onTouchEvent(cancelEvent)
+                cancelEvent.recycle()
+                verticalDrag = false
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> verticalDrag = false
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean = if (verticalDrag) false else super.performClick()
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var recordingStatus: TextView
@@ -537,7 +576,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(75, 85, 99))
             setPadding(0, dp(14), 0, dp(5))
         })
-        recordingModeSpinner = Spinner(this).apply {
+        recordingModeSpinner = ScrollFriendlySpinner(this).apply {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
@@ -561,7 +600,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(75, 85, 99))
             setPadding(0, dp(14), 0, dp(5))
         })
-        startAlertSpinner = Spinner(this).apply {
+        startAlertSpinner = ScrollFriendlySpinner(this).apply {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
@@ -588,7 +627,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(75, 85, 99))
             setPadding(0, dp(14), 0, dp(5))
         })
-        backgroundVideoQualitySpinner = Spinner(this).apply {
+        backgroundVideoQualitySpinner = ScrollFriendlySpinner(this).apply {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
@@ -615,7 +654,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(75, 85, 99))
             setPadding(0, dp(14), 0, dp(5))
         })
-        segmentDurationSpinner = Spinner(this).apply {
+        segmentDurationSpinner = ScrollFriendlySpinner(this).apply {
             setBackgroundColor(Color.WHITE)
             configureSegmentDurationSpinner(this)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -634,7 +673,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(75, 85, 99))
             setPadding(0, dp(14), 0, dp(5))
         })
-        audioSegmentDurationSpinner = Spinner(this).apply {
+        audioSegmentDurationSpinner = ScrollFriendlySpinner(this).apply {
             setBackgroundColor(Color.WHITE)
             configureAudioSegmentDurationSpinner(this)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
