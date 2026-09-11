@@ -421,9 +421,7 @@ class MainActivity : ComponentActivity() {
             backgroundStatus,
             audioStatus,
             chargingStatus,
-            serverStatus,
-            storageStatus,
-            audioStorageStatus
+            serverStatus
         ).forEach(root::addView)
         updateStorageStatus()
         updateAudioStorageStatus()
@@ -459,6 +457,12 @@ class MainActivity : ComponentActivity() {
         homeScroll = scroll
         homeRoot = root
         updatePreviewAvailability()
+
+        root.addView(actionButton("Storage Limits") {
+            showStorageLimitDialog()
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
+        root.addView(storageStatus)
+        root.addView(audioStorageStatus)
 
         val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
             .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
@@ -523,8 +527,8 @@ class MainActivity : ComponentActivity() {
             if (audioRecordingActive) stopAudioRecording() else requestAudioStart()
         }
         audioControls.addView(audioRecordButton, weighted())
-        audioControls.addView(actionButton("Local Audio") {
-            showLocalAudio()
+        audioControls.addView(actionButton("Upload Now") {
+            startManualUpload()
         }, weighted().apply { marginStart = dp(8) })
         root.addView(audioControls, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
         liveAccessButton = actionButton("Live Access") {
@@ -648,12 +652,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(actionButton("Storage Limits") {
-            showStorageLimitDialog()
-        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        secondaryControls.addView(actionButton("Upload Now") {
-            startManualUpload()
+        secondaryControls.addView(actionButton("Local Audio") {
+            showLocalAudio()
         }, weighted())
         secondaryControls.addView(actionButton("Local Videos") {
             showLocalVideos()
