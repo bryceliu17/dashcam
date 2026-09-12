@@ -98,6 +98,7 @@ class LiveAccessService : Service() {
     @Volatile private var streaming = false
     @Volatile private var torchEnabled = false
     @Volatile private var activeCameraHasFlash = false
+    @Volatile private var requestedCameraFacing = CAMERA_FACING_BACK
     private var lastLegacyFrameAt = 0L
     @Volatile private var cameraStartRunnable: Runnable? = null
 
@@ -312,6 +313,8 @@ class LiveAccessService : Service() {
 
     private fun applyLiveRequest(enabled: Boolean) {
         if (enabled && !LiveAccessSettings.isEnabled(this)) return
+        if (enabled && !liveRequested) requestedCameraFacing = CAMERA_FACING_BACK
+        if (!enabled) requestedCameraFacing = CAMERA_FACING_BACK
         liveRequested = enabled
         val recording = PowerRecordingSettings.isAnyRecordingActive(this)
         when {
@@ -336,6 +339,10 @@ class LiveAccessService : Service() {
             "torch_request" -> applyTorchRequest(
                 message.optString("requestId"),
                 message.optBoolean("enabled", false)
+            )
+            "live_camera_request" -> applyLiveCameraRequest(
+                message.optString("requestId"),
+                message.optString("facing")
             )
             "battery_history_request" -> {
                 val requestId = message.optString("requestId")
@@ -372,12 +379,17 @@ class LiveAccessService : Service() {
                     return@cameraStart
                 }
                 val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                val targetLensFacing = if (requestedCameraFacing == CAMERA_FACING_FRONT) {
+                    CameraCharacteristics.LENS_FACING_FRONT
+                } else {
+                    CameraCharacteristics.LENS_FACING_BACK
+                }
                 val cameraId = manager.cameraIdList.firstOrNull { id ->
                     manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) ==
-                        CameraCharacteristics.LENS_FACING_BACK
-                } ?: manager.cameraIdList.firstOrNull()
+                        targetLensFacing
+                }
                 if (cameraId == null) {
-                    stopStreaming("No camera is available")
+                    stopStreaming(cameraUnavailableMessage(requestedCameraFacing))
                     return@cameraStart
                 }
                 val characteristics = manager.getCameraCharacteristics(cameraId)
@@ -416,7 +428,8 @@ class LiveAccessService : Service() {
 
     @Suppress("DEPRECATION")
     private fun startLegacyStreaming(generation: Int) {
-        val cameraId = findLegacyBackCameraId()
+        val cameraId = findLegacyCameraId(requestedCameraFacing)
+            ?: return stopStreaming(cameraUnavailableMessage(requestedCameraFacing))
         val camera = Camera.open(cameraId)
         if (!isCurrentCameraRequest(generation)) {
             camera.release()
@@ -516,13 +529,18 @@ class LiveAccessService : Service() {
     }
 
     @Suppress("DEPRECATION")
-    private fun findLegacyBackCameraId(): Int {
+    private fun findLegacyCameraId(facing: String): Int? {
+        val targetFacing = if (facing == CAMERA_FACING_FRONT) {
+            Camera.CameraInfo.CAMERA_FACING_FRONT
+        } else {
+            Camera.CameraInfo.CAMERA_FACING_BACK
+        }
         val info = Camera.CameraInfo()
         for (id in 0 until Camera.getNumberOfCameras()) {
             Camera.getCameraInfo(id, info)
-            if (info.facing == Camera.CameraInfo.CAMERA_FACING_BACK) return id
+            if (info.facing == targetFacing) return id
         }
-        return 0
+        return null
     }
 
     private fun cameraStateCallback(generation: Int) = object : CameraDevice.StateCallback() {
@@ -632,6 +650,63 @@ class LiveAccessService : Service() {
         }
     }
 
+    private fun applyLiveCameraRequest(requestId: String, facing: String) {
+        if (requestId.isBlank()) return
+        val normalizedFacing = facing.lowercase()
+        if (normalizedFacing != CAMERA_FACING_BACK && normalizedFacing != CAMERA_FACING_FRONT) {
+            sendLiveCameraResponse(requestId, normalizedFacing, "Unknown camera selection")
+            return
+        }
+        cameraHandler.post {
+            if (!liveRequested) {
+                sendLiveCameraResponse(requestId, normalizedFacing, "Live camera is not active")
+                return@post
+            }
+            if (!hasCameraFacing(normalizedFacing)) {
+                sendLiveCameraResponse(requestId, normalizedFacing, cameraUnavailableMessage(normalizedFacing))
+                return@post
+            }
+            if (requestedCameraFacing == normalizedFacing && (streaming || cameraStarting)) {
+                sendLiveCameraResponse(requestId, normalizedFacing, null)
+                return@post
+            }
+            requestedCameraFacing = normalizedFacing
+            torchEnabled = false
+            val mustRestart = streaming || cameraStarting
+            if (mustRestart) stopStreaming()
+            cameraHandler.postDelayed({
+                if (!liveRequested) {
+                    sendLiveCameraResponse(requestId, normalizedFacing, "Live camera was closed")
+                    return@postDelayed
+                }
+                startStreaming()
+                sendLiveCameraResponse(requestId, normalizedFacing, null)
+            }, if (mustRestart) cameraReleaseDelayMs() else 0L)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hasCameraFacing(facing: String): Boolean = try {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            findLegacyCameraId(facing) != null
+        } else {
+            val targetLensFacing = if (facing == CAMERA_FACING_FRONT) {
+                CameraCharacteristics.LENS_FACING_FRONT
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK
+            }
+            val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            manager.cameraIdList.any { id ->
+                manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == targetLensFacing
+            }
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun cameraUnavailableMessage(facing: String): String =
+        if (facing == CAMERA_FACING_FRONT) "Front camera is unavailable" else "Back camera is unavailable"
+
     @Suppress("DEPRECATION")
     private fun updateLegacyTorch() {
         val camera = legacyCamera ?: throw IllegalStateException("Live camera is not ready")
@@ -668,6 +743,17 @@ class LiveAccessService : Service() {
                 .put("requestId", requestId)
                 .put("available", available)
                 .put("enabled", enabled)
+                .put("error", error ?: JSONObject.NULL)
+                .toString()
+        )
+    }
+
+    private fun sendLiveCameraResponse(requestId: String, facing: String, error: String?) {
+        controlSocket?.send(
+            JSONObject()
+                .put("type", "live_camera_response")
+                .put("requestId", requestId)
+                .put("facing", facing)
                 .put("error", error ?: JSONObject.NULL)
                 .toString()
         )
@@ -875,6 +961,8 @@ class LiveAccessService : Service() {
         private const val TORCH_READY_RETRY_MS = 250L
         private const val LEGACY_JPEG_QUALITY = 60
         private const val CAMERA_RELEASE_DELAY_MS = 300L
+        private const val CAMERA_FACING_BACK = "back"
+        private const val CAMERA_FACING_FRONT = "front"
         private const val TAG = "LiveAccessService"
         private val RECONNECT_DELAYS_MS = longArrayOf(5_000L, 15_000L, 30_000L, 60_000L)
 
