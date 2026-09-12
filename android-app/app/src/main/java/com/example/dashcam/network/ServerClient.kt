@@ -38,7 +38,8 @@ data class DeviceHeartbeat(
     val backgroundRecordingActive: Boolean = false,
     val backgroundVideoQuality: String = "Balanced",
     val videoSegmentMinutes: Int = 5,
-    val startAlert: String = "Silent"
+    val startAlert: String = "Silent",
+    val powerAutoBackgroundEnabled: Boolean = false
 )
 
 data class BatteryHistoryRequest(val requestId: String, val hours: Int)
@@ -72,6 +73,7 @@ fun DeviceHeartbeat.toJson(): JSONObject = JSONObject()
     .put("backgroundVideoQuality", backgroundVideoQuality)
     .put("videoSegmentMinutes", videoSegmentMinutes)
     .put("startAlert", startAlert)
+    .put("powerAutoBackgroundEnabled", powerAutoBackgroundEnabled)
 
 class ServerClient(private val baseUrl: String) {
     private val client = OkHttpClient.Builder()
