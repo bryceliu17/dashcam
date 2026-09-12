@@ -24,6 +24,7 @@ builder.Services.AddSingleton<LiveFrameStore>();
 builder.Services.AddSingleton<DeviceWebSocketHub>();
 builder.Services.AddSingleton<BatteryHistoryBroker>();
 builder.Services.AddSingleton<LiveTorchBroker>();
+builder.Services.AddSingleton<LiveCameraBroker>();
 builder.Services.AddSingleton<RemoteRecordingBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveStorageSettingsService>();
@@ -120,6 +121,7 @@ app.MapGet("/api/devices/socket", async (
     MobileUploadSettingsService uploadSettings,
     BatteryHistoryBroker batteryHistory,
     LiveTorchBroker liveTorch,
+    LiveCameraBroker liveCamera,
     LiveFrameStore liveFrames,
     RemoteRecordingBroker remoteRecording,
     IServiceScopeFactory serviceScopeFactory,
@@ -178,6 +180,12 @@ app.MapGet("/api/devices/socket", async (
             if (torchResponse is not null)
             {
                 liveTorch.TryComplete(deviceId, torchResponse);
+                return;
+            }
+            var cameraResponse = ParseLiveCameraResponse(message);
+            if (cameraResponse is not null)
+            {
+                liveCamera.TryComplete(deviceId, cameraResponse);
                 return;
             }
             var heartbeat = ParseSocketHeartbeat(message);
@@ -418,6 +426,49 @@ app.MapPost("/api/devices/{deviceId}/live/torch", async (
     {
         return Results.Json(
             new { error = "The phone did not confirm the flashlight request." },
+            statusCode: StatusCodes.Status504GatewayTimeout);
+    }
+    catch (InvalidOperationException error)
+    {
+        return Results.Conflict(new { error = error.Message });
+    }
+});
+
+app.MapPost("/api/devices/{deviceId}/live/camera", async (
+    string deviceId,
+    LiveCameraRequest request,
+    DashcamDbContext db,
+    DeviceWebSocketHub sockets,
+    LiveCameraBroker liveCamera,
+    CancellationToken cancellationToken) =>
+{
+    var facing = request.Facing?.Trim().ToLowerInvariant();
+    if (facing is not ("back" or "front"))
+        return Results.BadRequest(new { error = "Camera must be either back or front." });
+
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null) return Results.NotFound(new { error = "Device not found." });
+    if (!device.LiveRequested)
+        return Results.Conflict(new { error = "Start live viewing before switching cameras." });
+    if (sockets.GetConnectionState(deviceId) != true)
+        return Results.Conflict(new { error = "The phone control connection is unavailable." });
+
+    try
+    {
+        var response = await liveCamera.RequestAsync(
+            deviceId,
+            facing,
+            (requestId, requestedFacing, token) =>
+                sockets.SendLiveCameraRequestAsync(deviceId, requestId, requestedFacing, token),
+            cancellationToken);
+        if (!string.IsNullOrWhiteSpace(response.Error))
+            return Results.Conflict(new { error = response.Error });
+        return Results.Ok(new { response.Facing });
+    }
+    catch (TimeoutException)
+    {
+        return Results.Json(
+            new { error = "The phone did not confirm the camera switch." },
             statusCode: StatusCodes.Status504GatewayTimeout);
     }
     catch (InvalidOperationException error)
@@ -2844,6 +2895,26 @@ static LiveTorchResponse? ParseLiveTorchResponse(string message)
     }
 }
 
+static LiveCameraResponse? ParseLiveCameraResponse(string message)
+{
+    try
+    {
+        using var document = JsonDocument.Parse(message);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("type", out var type) || type.GetString() != "live_camera_response")
+            return null;
+        var response = JsonSerializer.Deserialize<LiveCameraResponse>(message, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+        return response is { RequestId.Length: > 0 } ? response : null;
+    }
+    catch (JsonException)
+    {
+        return null;
+    }
+}
+
 static async Task<DeviceStatus> ApplyDeviceHeartbeatAsync(
     DeviceHeartbeatRequest request,
     string deviceId,
@@ -3040,3 +3111,4 @@ public sealed record DeviceHeartbeatRequest(
     bool PowerAutoBackgroundEnabled = false);
 public sealed record LiveRequest(bool Enabled);
 public sealed record LiveTorchRequest(bool Enabled);
+public sealed record LiveCameraRequest(string? Facing);

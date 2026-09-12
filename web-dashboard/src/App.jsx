@@ -1294,7 +1294,7 @@ function AudioSessionPlayback({ session }) {
   </div>
 }
 
-function LiveViewer({ device, onClose, onTorch }) {
+function LiveViewer({ device, onClose, onTorch, onCamera }) {
   const [frameUrl, setFrameUrl] = useState('')
   const [waiting, setWaiting] = useState(true)
   const [rotation, setRotation] = useState(0)
@@ -1303,6 +1303,9 @@ function LiveViewer({ device, onClose, onTorch }) {
   const [torchEnabled, setTorchEnabled] = useState(false)
   const [torchBusy, setTorchBusy] = useState(false)
   const [torchError, setTorchError] = useState('')
+  const [cameraFacing, setCameraFacing] = useState('back')
+  const [cameraBusy, setCameraBusy] = useState(false)
+  const [cameraError, setCameraError] = useState('')
   const objectUrlRef = useRef('')
   const playerRef = useRef(null)
   const stageRef = useRef(null)
@@ -1383,6 +1386,28 @@ function LiveViewer({ device, onClose, onTorch }) {
     }
   }
 
+  const switchCamera = async facing => {
+    if (cameraBusy || facing === cameraFacing) return
+    setCameraBusy(true)
+    setCameraError('')
+    try {
+      const result = await onCamera(facing)
+      const appliedFacing = result.facing === 'front' ? 'front' : 'back'
+      setCameraFacing(appliedFacing)
+      if (appliedFacing === 'front') setTorchEnabled(false)
+    } catch (error) {
+      setCameraError(error.message)
+    } finally {
+      setCameraBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    setCameraFacing('back')
+    setCameraError('')
+    setTorchEnabled(false)
+  }, [device.deviceId])
+
   useEffect(() => {
     let active = true
     let timer
@@ -1440,6 +1465,22 @@ function LiveViewer({ device, onClose, onTorch }) {
           >
             <Icon name={fullscreen ? 'fullscreenExit' : 'fullscreen'} />
           </button>
+          <span className="live-camera-switch" aria-label="Live camera selection">
+            <button
+              type="button"
+              className={`torch-control${cameraFacing === 'back' ? ' active' : ''}`}
+              title="Use phone rear camera"
+              disabled={!device.liveStreaming || cameraBusy}
+              onClick={() => switchCamera('back')}
+            >Rear</button>
+            <button
+              type="button"
+              className={`torch-control${cameraFacing === 'front' ? ' active' : ''}`}
+              title="Use phone front camera"
+              disabled={!device.liveStreaming || cameraBusy}
+              onClick={() => switchCamera('front')}
+            >{cameraBusy ? 'Switching...' : 'Front'}</button>
+          </span>
           <button
             type="button"
             className="rotate-control"
@@ -1453,7 +1494,7 @@ function LiveViewer({ device, onClose, onTorch }) {
             type="button"
             className={`torch-control${torchEnabled ? ' active' : ''}`}
             title={torchEnabled ? 'Turn phone flashlight off' : 'Turn phone flashlight on'}
-            disabled={!device.liveStreaming || torchBusy}
+            disabled={!device.liveStreaming || torchBusy || cameraBusy || cameraFacing === 'front'}
             onClick={toggleTorch}
           >
             <Icon name="flashlight" />
@@ -1476,7 +1517,7 @@ function LiveViewer({ device, onClose, onTorch }) {
         />}
         {waiting && <div className="live-waiting"><div className="spinner" /><span>Waiting for phone camera...</span></div>}
       </div>
-      <p>{torchError || device.liveError || (device.liveStreaming ? `Live camera connected - view rotation ${rotation} deg${torchEnabled ? ' - flashlight on' : ''}` : 'Starting live camera')}</p>
+      <p>{cameraError || torchError || device.liveError || (device.liveStreaming ? `Live ${cameraFacing} camera connected - view rotation ${rotation} deg${torchEnabled ? ' - flashlight on' : ''}` : 'Starting live camera')}</p>
     </div>
   </div>
 }
@@ -2171,6 +2212,11 @@ export default function App() {
     body: JSON.stringify({ enabled }),
   }), [])
 
+  const setLiveCamera = useCallback(async (deviceId, facing) => api(`/api/devices/${encodeURIComponent(deviceId)}/live/camera`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ facing }),
+  }), [])
+
   const toggleLock = async (video) => {
     try {
       const updated = await api(`/api/videos/${video.id}/lock`, {
@@ -2843,7 +2889,7 @@ export default function App() {
       <p>{formatDate(selectedAudioSession.recordings[0].startTime)} to {formatDate(selectedAudioSession.recordings.at(-1).endTime)} | {formatTotalDuration(selectedAudioSession.durationSeconds)} including short silent intervals</p>
     </div></div>}
     {selectedTranscript && <TranscriptViewer transcript={selectedTranscript} onClose={() => setSelectedTranscript(null)} onDelete={deleteAudioTranscript} />}
-    {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} onTorch={enabled => setLiveTorch(liveDevice.deviceId, enabled)} />}
+    {liveDevice && <LiveViewer device={liveDevice} onClose={options => stopLive(liveDevice.deviceId, options)} onTorch={enabled => setLiveTorch(liveDevice.deviceId, enabled)} onCamera={facing => setLiveCamera(liveDevice.deviceId, facing)} />}
     {batteryHistory && <BatteryHistoryModal state={batteryHistory} onRange={hours => loadBatteryHistory(batteryHistory.device, hours)} onClose={closeBatteryHistory} />}
   </div>
 }

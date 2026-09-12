@@ -94,6 +94,16 @@ public sealed class DeviceWebSocketHub
             new { type = "torch_request", requestId, enabled },
             cancellationToken);
 
+    public Task<bool> SendLiveCameraRequestAsync(
+        string deviceId,
+        string requestId,
+        string facing,
+        CancellationToken cancellationToken) =>
+        SendJsonAsync(
+            deviceId,
+            new { type = "live_camera_request", requestId, facing },
+            cancellationToken);
+
     public Task<bool> SendBatteryHistoryRequestAsync(
         string deviceId,
         string requestId,
