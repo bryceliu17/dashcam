@@ -49,4 +49,5 @@ public sealed class RemoteRecordingBroker
 
 public sealed record RemoteRecordingRequest(string Action, string? Quality, int? SegmentMinutes, string? StartAlert);
 public sealed record RemoteRecordingResponse(string RequestId, bool Success, string? Error,
-    bool BackgroundRecordingActive, string? Quality, int SegmentMinutes, string? StartAlert);
+    bool BackgroundRecordingActive, string? Quality, int SegmentMinutes, string? StartAlert,
+    bool AudioRecordingActive);

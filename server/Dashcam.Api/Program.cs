@@ -312,9 +312,9 @@ app.MapPost("/api/devices/{deviceId}/recording", async (
     string deviceId, RemoteRecordingRequest request, DashcamDbContext db,
     DeviceWebSocketHub sockets, RemoteRecordingBroker broker, CancellationToken cancellationToken) =>
 {
-    if (request.Action is not ("start" or "stop" or "configure"))
-        return Results.BadRequest(new { error = "Choose start, stop or configure." });
-    if (request.Action != "stop" &&
+    if (request.Action is not ("start" or "stop" or "configure" or "start_audio" or "stop_audio"))
+        return Results.BadRequest(new { error = "Choose a video or audio recording command." });
+    if (request.Action is "start" or "configure" &&
         (request.Quality is not ("Balanced" or "High") ||
          request.SegmentMinutes is null or < 0 or > 1440 ||
          request.StartAlert is not ("Silent" or "SoundOnly" or "ScreenOnly" or "SoundAndScreen")))

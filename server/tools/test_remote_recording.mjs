@@ -31,6 +31,7 @@ try {
   status.remoteControlEnabled = true
   await post('/api/devices/heartbeat', status)
   assert.equal((await command(request)).status, 409, 'No offline command queue')
+  assert.equal((await command({ action: 'start_audio' })).status, 409, 'Audio also has no offline command queue')
   assert.equal((await command({ ...request, segmentMinutes: -1 })).status, 400)
   assert.equal((await command({ ...request, segmentMinutes: 1.5 })).status, 400)
   assert.equal((await command({ ...request, quality: 'invalid' })).status, 400)
@@ -68,6 +69,16 @@ try {
   assert.equal(result.status, 200)
   assert.equal(result.body.success, true)
   assert.equal(result.body.backgroundRecordingActive, true)
+  const incomingAudio = nextCommand()
+  const audioPending = command({ action: 'start_audio' })
+  const audioMessage = await incomingAudio
+  assert.equal(audioMessage.action, 'start_audio')
+  socket.send(JSON.stringify({ type: 'recording_response', requestId: audioMessage.requestId,
+    success: true, backgroundRecordingActive: false, audioRecordingActive: true,
+    quality: 'Balanced', segmentMinutes: 5, startAlert: 'Silent' }))
+  const audioResult = await audioPending
+  assert.equal(audioResult.status, 200)
+  assert.equal(audioResult.body.audioRecordingActive, true)
   const incomingStop = nextCommand()
   const stopPending = command({ action: 'stop' })
   const stopMessage = await incomingStop

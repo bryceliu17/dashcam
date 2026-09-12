@@ -42,6 +42,10 @@ class AudioRecordingService : Service() {
     private var recordingActive = false
     private var startAlertPending = false
     private var wakeLock: PowerManager.WakeLock? = null
+    private var remoteStartExpiresAt = 0L
+
+    private fun remoteStartAllowed() = remoteStartExpiresAt == 0L ||
+        (RemoteRecordingControl.isEnabled(this) && System.currentTimeMillis() <= remoteStartExpiresAt)
 
     private val rotateRunnable = Runnable {
         if (recordingActive) finishSegment(restart = true)
@@ -60,13 +64,25 @@ class AudioRecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.hasExtra(RemoteRecordingControl.EXTRA_REMOTE_EXPIRES_AT) == true &&
+            (!RemoteRecordingControl.isEnabled(this) ||
+                System.currentTimeMillis() > intent.getLongExtra(RemoteRecordingControl.EXTRA_REMOTE_EXPIRES_AT, 0))) {
+            startForeground(NOTIFICATION_ID, buildNotification("Remote request cancelled"))
+            if (!recordingActive) finishService()
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_STOP -> stopRecording()
             ACTION_QUERY_STATE -> {
                 broadcastState(recordingActive, elapsedSeconds(), finalFile?.name)
                 if (!recordingActive) stopSelf(startId)
             }
-            else -> startRecording()
+            else -> {
+                if (!recordingActive) {
+                    remoteStartExpiresAt = intent?.getLongExtra(RemoteRecordingControl.EXTRA_REMOTE_EXPIRES_AT, 0) ?: 0
+                }
+                startRecording()
+            }
         }
         return START_NOT_STICKY
     }
@@ -75,12 +91,19 @@ class AudioRecordingService : Service() {
 
     private fun startRecording() {
         if (recordingActive) return
+        if (!remoteStartAllowed()) {
+            RemoteRecordingControl.audioRecordingError = "Remote request expired before recording could start"
+            finishService()
+            return
+        }
         startForeground(NOTIFICATION_ID, buildNotification("Starting audio recording"))
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            RemoteRecordingControl.audioRecordingError = "Microphone permission is required"
             finishService("Microphone permission is required")
             return
         }
         if (PowerRecordingSettings.isVideoRecordingActive(this)) {
+            RemoteRecordingControl.audioRecordingError = "Stop video recording before starting audio"
             finishService("Stop video recording before starting audio")
             return
         }
@@ -100,6 +123,10 @@ class AudioRecordingService : Service() {
 
     private fun startSegment() {
         if (!recordingActive || recorder != null) return
+        if (!remoteStartAllowed()) {
+            failAndStop("Remote request expired before recording could start")
+            return
+        }
         val directory = audioDirectory()
         val startedAt = System.currentTimeMillis()
         val filename = SimpleDateFormat("'audio_'yyyyMMdd_HHmmss_SSS'.m4a'", Locale.US).format(Date(startedAt))
@@ -122,6 +149,8 @@ class AudioRecordingService : Service() {
             finalFile = destination
             segmentStartMs = startedAt
             recorder = nextRecorder
+            remoteStartExpiresAt = 0L
+            RemoteRecordingControl.audioRecorderStarted = true
             if (startAlertPending) {
                 startAlertPending = false
                 RecordingStartAlert.show(this)
@@ -217,6 +246,7 @@ class AudioRecordingService : Service() {
         File(getExternalFilesDir(Environment.DIRECTORY_MUSIC), AUDIO_DIRECTORY).apply { mkdirs() }
 
     private fun failAndStop(message: String) {
+        RemoteRecordingControl.audioRecordingError = message
         recordingActive = false
         temporaryFile?.delete()
         try { recorder?.release() } catch (_: RuntimeException) { }
@@ -230,6 +260,7 @@ class AudioRecordingService : Service() {
         mainHandler.removeCallbacks(rotateRunnable)
         mainHandler.removeCallbacks(statusRunnable)
         recordingActive = false
+        RemoteRecordingControl.audioRecorderStarted = false
         segmentStartMs = 0L
         PowerRecordingSettings.setAudioRecordingActive(this, false)
         releaseWakeLock()

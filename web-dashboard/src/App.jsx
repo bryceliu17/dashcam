@@ -1693,10 +1693,11 @@ function RemoteRecordingPanel({ device, onClose, onUpdated }) {
 
   const send = async action => {
     if (busy || !connected) return
-    if (action !== 'stop' && !form.current.reportValidity()) return
+    const videoAction = action === 'start' || action === 'configure'
+    if (videoAction && !form.current.reportValidity()) return
     setBusy(action)
     setFailed(false)
-    setMessage(action === 'stop' ? 'Saving the current segment and stopping…' : action === 'start' ? 'Waiting for the phone to start recording…' : 'Saving settings on the phone…')
+    setMessage(action === 'stop' ? 'Saving the current video segment and stopping…' : action === 'stop_audio' ? 'Saving the current audio segment and stopping…' : action === 'start' ? 'Waiting for the phone to start video recording…' : action === 'start_audio' ? 'Waiting for the phone to start audio recording…' : 'Saving video settings on the phone…')
     try {
       const result = await api(`/api/devices/${encodeURIComponent(device.deviceId)}/recording`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1705,7 +1706,7 @@ function RemoteRecordingPanel({ device, onClose, onUpdated }) {
       if (!result.success) throw new Error(result.error || 'The phone could not complete this command.')
       onUpdated(device.deviceId, result)
       setDirty(false)
-      setMessage(action === 'stop' ? 'Recording stopped. The current segment has been saved.' : action === 'start' ? 'The phone confirmed recording has started.' : 'Settings saved on the phone.')
+      setMessage(action === 'stop' || action === 'stop_audio' ? 'Recording stopped. The current segment has been saved.' : action === 'start' || action === 'start_audio' ? 'The phone confirmed recording has started.' : 'Video settings saved on the phone.')
     } catch (error) { setMessage(error.message); setFailed(true) }
     finally { setBusy('') }
   }
@@ -1731,11 +1732,13 @@ function RemoteRecordingPanel({ device, onClose, onUpdated }) {
               <option value="Silent">Silent</option><option value="SoundOnly">Sound only</option><option value="ScreenOnly">Screen only</option><option value="SoundAndScreen">Sound + screen</option>
             </select></label>
           </fieldset>
-          <p>These settings are saved on the phone. Change them while recording is stopped. Starting uses the selected settings and alert.</p>
+          <p>These settings apply to background video. Audio uses its existing phone-side segment and alert settings.</p>
           <div className="remote-recording-actions">
             <button type="button" disabled={!connected || Boolean(busy) || recording} onClick={() => send('configure')}>Save settings</button>
             <button type="submit" disabled={!connected || Boolean(busy) || recording || device.liveStreaming || device.liveRequested}>Start video</button>
-            <button type="button" className="danger" disabled={!connected || Boolean(busy) || !device.backgroundRecordingActive} onClick={() => send('stop')}>Stop & save</button>
+            <button type="button" className="danger" disabled={!connected || Boolean(busy) || !device.backgroundRecordingActive} onClick={() => send('stop')}>Stop video & save</button>
+            <button type="button" disabled={!connected || Boolean(busy) || recording || device.liveStreaming || device.liveRequested} onClick={() => send('start_audio')}>Start audio</button>
+            <button type="button" className="danger" disabled={!connected || Boolean(busy) || !device.audioRecordingActive} onClick={() => send('stop_audio')}>Stop audio & save</button>
           </div>
           {(device.liveStreaming || device.liveRequested) && <p>Close live camera before starting video recording.</p>}
           {device.videoRecordingActive && !device.backgroundRecordingActive && <p>Foreground recording must be stopped on the phone.</p>}
@@ -2813,7 +2816,8 @@ export default function App() {
       onClose={() => setRemoteDeviceId(null)}
       onUpdated={(id, result) => setDevices(current => current.map(device => device.deviceId === id ? {
         ...device, backgroundRecordingActive: result.backgroundRecordingActive,
-        videoRecordingActive: result.backgroundRecordingActive, backgroundVideoQuality: result.quality,
+        videoRecordingActive: result.backgroundRecordingActive, audioRecordingActive: result.audioRecordingActive,
+        backgroundVideoQuality: result.quality,
         videoSegmentMinutes: result.segmentMinutes, startAlert: result.startAlert,
       } : device))}
     />}
