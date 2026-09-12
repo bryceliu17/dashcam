@@ -104,6 +104,9 @@ public sealed class DeviceWebSocketHub
             new { type = "battery_history_request", requestId, hours },
             cancellationToken);
 
+    public Task<bool> SendRecordingRequestAsync(string deviceId, object payload, CancellationToken cancellationToken) =>
+        SendJsonAsync(deviceId, payload, cancellationToken);
+
     private Task<bool> SendJsonAsync(
         string deviceId,
         object payload,

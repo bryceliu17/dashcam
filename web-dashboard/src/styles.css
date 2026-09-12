@@ -1,5 +1,20 @@
 :root { font-family: system-ui, 'Microsoft YaHei', sans-serif; color: #e9edf2; background: #080b0f; font-synthesis: none; }
 * { box-sizing: border-box; }
+.remote-recording-panel { width: min(600px, 100%); max-height: calc(100dvh - 24px); overflow-y: auto; }
+.remote-recording-body { padding: 16px; border-top: 1px solid #303841; }
+.remote-recording-body p { padding: 0; line-height: 1.6; }
+.remote-recording-body .remote-recording-state { color: #dfffc2; }
+.remote-recording-body fieldset { margin: 12px 0; padding: 0; border: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.remote-recording-body fieldset label { display: flex; min-width: 0; flex-direction: column; gap: 7px; color: #aab3bc; font-size: 12px; }
+.remote-recording-body select,.remote-recording-body input { width: 100%; min-height: 44px; border: 1px solid #3a444e; background: #11161b; color: #e9edf2; color-scheme: dark; padding: 8px; }
+.remote-recording-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.remote-recording-actions button { flex: 1; min-height: 44px; padding: 8px 12px; border: 1px solid #6b9148; background: #192413; color: #dfffc2; white-space: nowrap; }
+.remote-recording-actions button.danger { border-color: #583231; background: #211312; color: #ffaba4; }
+.remote-recording-panel button:disabled,.remote-recording-panel fieldset:disabled { opacity: .5; cursor: not-allowed; }
+.remote-recording-body .remote-command-error { color: #ffaba4; }
+.remote-recording-body .remote-command-status { color: #a9ff5c; }
+.device-table .remote-open-button { margin-top: 7px; }
+@media (max-width: 480px) { .remote-recording-body fieldset { grid-template-columns: 1fr; gap: 12px; } }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at 75% -20%, #1b2630 0, transparent 38%), #080b0f; }
 button, input, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }

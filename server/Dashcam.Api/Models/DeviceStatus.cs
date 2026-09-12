@@ -16,6 +16,11 @@ public sealed class DeviceStatus
     public bool VideoRecordingActive { get; set; }
     public bool AudioRecordingActive { get; set; }
     public bool LiveAccessEnabled { get; set; }
+    public bool RemoteControlEnabled { get; set; }
+    public bool BackgroundRecordingActive { get; set; }
+    public string BackgroundVideoQuality { get; set; } = "Balanced";
+    public int VideoSegmentMinutes { get; set; } = 5;
+    public string StartAlert { get; set; } = "Silent";
     public bool LiveRequested { get; set; }
     public bool LiveStreaming { get; set; }
     public required string LiveError { get; set; }

@@ -24,6 +24,7 @@ builder.Services.AddSingleton<LiveFrameStore>();
 builder.Services.AddSingleton<DeviceWebSocketHub>();
 builder.Services.AddSingleton<BatteryHistoryBroker>();
 builder.Services.AddSingleton<LiveTorchBroker>();
+builder.Services.AddSingleton<RemoteRecordingBroker>();
 builder.Services.AddSingleton<ArchiveMutationGate>();
 builder.Services.AddSingleton<ArchiveStorageSettingsService>();
 builder.Services.AddSingleton<MobileUploadSettingsService>();
@@ -120,6 +121,7 @@ app.MapGet("/api/devices/socket", async (
     BatteryHistoryBroker batteryHistory,
     LiveTorchBroker liveTorch,
     LiveFrameStore liveFrames,
+    RemoteRecordingBroker remoteRecording,
     IServiceScopeFactory serviceScopeFactory,
     CancellationToken cancellationToken) =>
 {
@@ -165,6 +167,7 @@ app.MapGet("/api/devices/socket", async (
         uploadSettings.IsAllowed,
         async (message, messageCancellationToken) =>
         {
+            if (remoteRecording.HandleResponse(deviceId, message)) return;
             var historyResponse = ParseBatteryHistoryResponse(message);
             if (historyResponse is not null)
             {
@@ -301,8 +304,37 @@ app.MapGet("/api/devices", async (
         items = devices.Select(device => ToDeviceResponse(
             device,
             now,
-            device.LiveAccessEnabled ? sockets.GetConnectionState(device.DeviceId) : null))
+            sockets.GetConnectionState(device.DeviceId)))
     });
+});
+
+app.MapPost("/api/devices/{deviceId}/recording", async (
+    string deviceId, RemoteRecordingRequest request, DashcamDbContext db,
+    DeviceWebSocketHub sockets, RemoteRecordingBroker broker, CancellationToken cancellationToken) =>
+{
+    if (request.Action is not ("start" or "stop" or "configure"))
+        return Results.BadRequest(new { error = "Choose start, stop or configure." });
+    if (request.Action != "stop" &&
+        (request.Quality is not ("Balanced" or "High") ||
+         request.SegmentMinutes is null or < 0 or > 1440 ||
+         request.StartAlert is not ("Silent" or "SoundOnly" or "ScreenOnly" or "SoundAndScreen")))
+        return Results.BadRequest(new { error = "Choose a video quality, a segment length from 0 to 1440 minutes, and a start alert." });
+    var device = await db.DeviceStatuses.FindAsync([deviceId], cancellationToken);
+    if (device is null) return Results.NotFound(new { error = "Device not found." });
+    if (!device.RemoteControlEnabled)
+        return Results.Json(new { error = "Enable Allow server control on the phone first." }, statusCode: 403);
+    if (sockets.GetConnectionState(deviceId) != true)
+        return Results.Conflict(new { error = "The phone control connection is offline. Commands are not queued." });
+    try
+    {
+        var response = await broker.RequestAsync(deviceId, request, sockets, cancellationToken);
+        return Results.Ok(response);
+    }
+    catch (InvalidOperationException error) { return Results.Conflict(new { error = error.Message }); }
+    catch (TimeoutException)
+    {
+        return Results.Json(new { error = "No confirmation from the phone. Check its recording status before retrying." }, statusCode: 504);
+    }
 });
 
 app.MapPost("/api/devices/{deviceId}/live", async (
@@ -2366,6 +2398,11 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveStreaming", "INTEGER NOT NULL DEFAULT 0");
     await EnsureColumnAsync(db, "DeviceStatuses", "LiveError", "TEXT NOT NULL DEFAULT ''");
     await EnsureColumnAsync(db, "DeviceStatuses", "LastSeenTransport", "TEXT NOT NULL DEFAULT 'http'");
+    await EnsureColumnAsync(db, "DeviceStatuses", "RemoteControlEnabled", "INTEGER NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "DeviceStatuses", "BackgroundRecordingActive", "INTEGER NOT NULL DEFAULT 0");
+    await EnsureColumnAsync(db, "DeviceStatuses", "BackgroundVideoQuality", "TEXT NOT NULL DEFAULT 'Balanced'");
+    await EnsureColumnAsync(db, "DeviceStatuses", "VideoSegmentMinutes", "INTEGER NOT NULL DEFAULT 5");
+    await EnsureColumnAsync(db, "DeviceStatuses", "StartAlert", "TEXT NOT NULL DEFAULT 'Silent'");
 }
 
 static async Task EnsureRecordingSourceColumnsAsync(DashcamDbContext db)
@@ -2727,6 +2764,11 @@ static object ToDeviceResponse(DeviceStatus device, DateTime now, bool? socketCo
     device.VideoRecordingActive,
     device.AudioRecordingActive,
     device.LiveAccessEnabled,
+    device.RemoteControlEnabled,
+    device.BackgroundRecordingActive,
+    device.BackgroundVideoQuality,
+    device.VideoSegmentMinutes,
+    device.StartAlert,
     device.LiveRequested,
     device.LiveStreaming,
     device.LiveError,
@@ -2861,6 +2903,12 @@ static async Task<DeviceStatus> ApplyDeviceHeartbeatAsync(
         device.LastSeenAt = now;
     }
 
+    device.RemoteControlEnabled = request.RemoteControlEnabled;
+    device.BackgroundRecordingActive = request.BackgroundRecordingActive;
+    device.BackgroundVideoQuality = request.BackgroundVideoQuality == "High" ? "High" : "Balanced";
+    device.VideoSegmentMinutes = Math.Clamp(request.VideoSegmentMinutes, 0, 1440);
+    device.StartAlert = request.StartAlert is "SoundOnly" or "ScreenOnly" or "SoundAndScreen" ? request.StartAlert : "Silent";
+
     if (!request.LiveAccessEnabled || request.VideoRecordingActive || request.AudioRecordingActive)
     {
         device.LiveRequested = false;
@@ -2980,6 +3028,11 @@ public sealed record DeviceHeartbeatRequest(
     bool AudioRecordingActive,
     bool LiveAccessEnabled,
     bool LiveStreaming,
-    string? LiveError);
+    string? LiveError,
+    bool RemoteControlEnabled = false,
+    bool BackgroundRecordingActive = false,
+    string? BackgroundVideoQuality = "Balanced",
+    int VideoSegmentMinutes = 5,
+    string? StartAlert = "Silent");
 public sealed record LiveRequest(bool Enabled);
 public sealed record LiveTorchRequest(bool Enabled);

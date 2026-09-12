@@ -1671,6 +1671,81 @@ function BatteryHistoryModal({ state, onRange, onClose }) {
   </div></div>
 }
 
+function RemoteRecordingPanel({ device, onClose, onUpdated }) {
+  const [quality, setQuality] = useState(device.backgroundVideoQuality || 'Balanced')
+  const [minutes, setMinutes] = useState(String(device.videoSegmentMinutes ?? 5))
+  const [alert, setAlert] = useState(device.startAlert || 'Silent')
+  const [busy, setBusy] = useState('')
+  const [message, setMessage] = useState('')
+  const [failed, setFailed] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const form = useRef(null)
+  const connected = device.online && device.onlineSource === 'websocket' && device.remoteControlEnabled
+  const recording = device.videoRecordingActive || device.audioRecordingActive
+
+  useEffect(() => {
+    if (!dirty && !busy) {
+      setQuality(device.backgroundVideoQuality || 'Balanced')
+      setMinutes(String(device.videoSegmentMinutes ?? 5))
+      setAlert(device.startAlert || 'Silent')
+    }
+  }, [device.backgroundVideoQuality, device.videoSegmentMinutes, device.startAlert, dirty, busy])
+
+  const send = async action => {
+    if (busy || !connected) return
+    if (action !== 'stop' && !form.current.reportValidity()) return
+    setBusy(action)
+    setFailed(false)
+    setMessage(action === 'stop' ? 'Saving the current segment and stopping…' : action === 'start' ? 'Waiting for the phone to start recording…' : 'Saving settings on the phone…')
+    try {
+      const result = await api(`/api/devices/${encodeURIComponent(device.deviceId)}/recording`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, quality, segmentMinutes: Number(minutes), startAlert: alert }),
+      })
+      if (!result.success) throw new Error(result.error || 'The phone could not complete this command.')
+      onUpdated(device.deviceId, result)
+      setDirty(false)
+      setMessage(action === 'stop' ? 'Recording stopped. The current segment has been saved.' : action === 'start' ? 'The phone confirmed recording has started.' : 'Settings saved on the phone.')
+    } catch (error) { setMessage(error.message); setFailed(true) }
+    finally { setBusy('') }
+  }
+
+  return <div className="modal" onMouseDown={() => { if (!busy) onClose() }}>
+    <div className="player remote-recording-panel" onMouseDown={event => event.stopPropagation()}>
+      <div><strong>Remote recording · {device.deviceName}</strong><button className="close-player" aria-label="Close remote control" disabled={Boolean(busy)} onClick={onClose}>X</button></div>
+      <div className="remote-recording-body">
+        <p className="remote-recording-state">{device.backgroundRecordingActive ? 'Background video recording' : device.videoRecordingActive ? 'Foreground video recording' : device.audioRecordingActive ? 'Audio recording' : 'Idle'} · {connected ? 'Control connected' : 'Control unavailable'}</p>
+        {!device.remoteControlEnabled && <p>Turn on “Allow server control” in the phone app. Only the phone can grant this permission.</p>}
+        {device.remoteControlEnabled && !connected && <p>The phone must reconnect before commands can be sent. Offline commands are not queued.</p>}
+        <form ref={form} onSubmit={event => { event.preventDefault(); send('start') }}>
+          <fieldset disabled={!connected || Boolean(busy) || recording}>
+            <label>Background video quality<select value={quality} onChange={event => { setQuality(event.target.value); setDirty(true) }}>
+              <option value="Balanced">Balanced · 720p</option><option value="High">High · 1080p (when supported)</option>
+            </select></label>
+            <label>Video segment length<select value={['0', '1', '3', '5', '10', '15', '30'].includes(minutes) ? minutes : 'custom'} onChange={event => { setMinutes(event.target.value === 'custom' ? '' : event.target.value); setDirty(true) }}>
+              {[1, 3, 5, 10, 15, 30].map(value => <option key={value} value={value}>{value} minutes</option>)}
+              <option value="0">Unlimited</option><option value="custom">Custom</option>
+            </select></label>
+            <label>Minutes (0 = unlimited)<input type="number" inputMode="numeric" min="0" max="1440" step="1" required value={minutes} onChange={event => { setMinutes(event.target.value); setDirty(true) }} /></label>
+            <label>Start alert<select value={alert} onChange={event => { setAlert(event.target.value); setDirty(true) }}>
+              <option value="Silent">Silent</option><option value="SoundOnly">Sound only</option><option value="ScreenOnly">Screen only</option><option value="SoundAndScreen">Sound + screen</option>
+            </select></label>
+          </fieldset>
+          <p>These settings are saved on the phone. Change them while recording is stopped. Starting uses the selected settings and alert.</p>
+          <div className="remote-recording-actions">
+            <button type="button" disabled={!connected || Boolean(busy) || recording} onClick={() => send('configure')}>Save settings</button>
+            <button type="submit" disabled={!connected || Boolean(busy) || recording || device.liveStreaming || device.liveRequested}>Start video</button>
+            <button type="button" className="danger" disabled={!connected || Boolean(busy) || !device.backgroundRecordingActive} onClick={() => send('stop')}>Stop & save</button>
+          </div>
+          {(device.liveStreaming || device.liveRequested) && <p>Close live camera before starting video recording.</p>}
+          {device.videoRecordingActive && !device.backgroundRecordingActive && <p>Foreground recording must be stopped on the phone.</p>}
+        </form>
+        {message && <p className={failed ? 'remote-command-error' : 'remote-command-status'} role="status" aria-live="polite">{message}</p>}
+      </div>
+    </div>
+  </div>
+}
+
 export default function App() {
   const [videos, setVideos] = useState([])
   const [audio, setAudio] = useState([])
@@ -1686,6 +1761,7 @@ export default function App() {
   const [selectedAudioSession, setSelectedAudioSession] = useState(null)
   const [selectedTranscript, setSelectedTranscript] = useState(null)
   const [liveDeviceId, setLiveDeviceId] = useState(null)
+  const [remoteDeviceId, setRemoteDeviceId] = useState(null)
   const [batteryHistory, setBatteryHistory] = useState(null)
   const [archiveType, setArchiveType] = useState('video')
   const [loading, setLoading] = useState(true)
@@ -2549,7 +2625,7 @@ export default function App() {
         </div>
         <div className="device-table-wrap">
           <table className="device-table">
-            <thead><tr><th>Device</th><th>Status</th><th>Last IP</th><th>Battery</th><th>Power</th><th>Activity</th><th>Software</th><th>Last seen</th><th>Live</th></tr></thead>
+            <thead><tr><th>Device</th><th>Status</th><th>Last IP</th><th>Battery</th><th>Power</th><th>Activity</th><th>Software</th><th>Last seen</th><th>Live / control</th></tr></thead>
             <tbody>{devices.map(device => <tr key={device.deviceId}>
               <td className="device-name"><strong>{device.deviceName}</strong><small>{device.manufacturer} {device.model}</small></td>
               <td><span className={`device-status ${device.online ? 'online' : 'offline'}`}><i />{device.online ? `Online (${device.onlineSource === 'websocket' ? 'WebSocket' : 'HTTP'})` : 'Offline'}</span></td>
@@ -2567,7 +2643,10 @@ export default function App() {
                 disabled={!device.liveRequested && (!device.online || !device.liveAccessEnabled || device.videoRecordingActive || device.audioRecordingActive)}
                 title={!device.liveAccessEnabled ? 'Enable Live Access on the phone' : device.liveRequested ? 'Stop live view' : 'Start live view'}
                 onClick={() => device.liveRequested ? stopLive(device.deviceId) : startLive(device)}
-              ><Icon name={device.liveRequested ? 'stop' : 'camera'} />{device.liveRequested ? 'Stop' : 'View'}</button></td>
+              ><Icon name={device.liveRequested ? 'stop' : 'camera'} />{device.liveRequested ? 'Stop' : 'View'}</button>
+                <button type="button" className="device-live-button remote-open-button" onClick={() => setRemoteDeviceId(device.deviceId)}>Control</button>
+                <small className="software-version">Control {device.remoteControlEnabled ? 'allowed' : 'off'}</small>
+              </td>
             </tr>)}</tbody>
           </table>
           {!loading && devices.length === 0 && <div className="device-empty">No phones have reported to this server yet.</div>}
@@ -2728,6 +2807,16 @@ export default function App() {
       </section>
     </main>
 
+    {remoteDeviceId && devices.some(device => device.deviceId === remoteDeviceId) && <RemoteRecordingPanel
+      key={remoteDeviceId}
+      device={devices.find(device => device.deviceId === remoteDeviceId)}
+      onClose={() => setRemoteDeviceId(null)}
+      onUpdated={(id, result) => setDevices(current => current.map(device => device.deviceId === id ? {
+        ...device, backgroundRecordingActive: result.backgroundRecordingActive,
+        videoRecordingActive: result.backgroundRecordingActive, backgroundVideoQuality: result.quality,
+        videoSegmentMinutes: result.segmentMinutes, startAlert: result.startAlert,
+      } : device))}
+    />}
     {selected && <div className="modal" onMouseDown={() => setSelected(null)}><div className="player" onMouseDown={e => e.stopPropagation()}>
       <div><strong>{selected.originalFilename || selected.filename}</strong><span className="player-actions"><button className="rotate-control" title="Rotate playback clockwise by 90 degrees" onClick={() => rotatePlayback(selected)}><Icon name="rotate" /><span>Rotate 90 deg</span></button><button className="close-player" aria-label="Close player" onClick={() => setSelected(null)}>X</button></span></div>
       <RotatedVideo key={selected.id} src={`${API}/api/videos/${selected.id}/stream`} rotation={selected.playbackRotationDegrees || 0} startTime={selected.startTime} />

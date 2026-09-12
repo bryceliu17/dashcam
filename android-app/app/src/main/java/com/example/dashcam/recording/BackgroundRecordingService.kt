@@ -53,6 +53,10 @@ class BackgroundRecordingService : Service() {
     private var continueRecording = false
     private var stopAfterCurrentSegmentRequested = false
     private var startAlertPending = false
+    private var remoteStartExpiresAt = 0L
+
+    private fun remoteStartAllowed() = remoteStartExpiresAt == 0L ||
+        (RemoteRecordingControl.isEnabled(this) && System.currentTimeMillis() <= remoteStartExpiresAt)
 
     private val rotateRunnable = Runnable {
         if (continueRecording) stopSegment(restart = !stopAfterCurrentSegmentRequested)
@@ -74,6 +78,13 @@ class BackgroundRecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.hasExtra(RemoteRecordingControl.EXTRA_REMOTE_EXPIRES_AT) == true &&
+            (!RemoteRecordingControl.isEnabled(this) ||
+             System.currentTimeMillis() > intent.getLongExtra(RemoteRecordingControl.EXTRA_REMOTE_EXPIRES_AT, 0))) {
+            startForeground(NOTIFICATION_ID, buildNotification("Remote request cancelled"))
+            if (!continueRecording) finishService()
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_STOP -> stopRecording()
             ACTION_STOP_AFTER_SEGMENT -> stopAfterCurrentSegment()
@@ -81,7 +92,10 @@ class BackgroundRecordingService : Service() {
                 broadcastState(continueRecording, currentElapsedSeconds(), currentFile?.name)
                 if (!continueRecording) stopSelf(startId)
             }
-            else -> startRecording()
+            else -> {
+                if (!continueRecording) remoteStartExpiresAt = intent?.getLongExtra(RemoteRecordingControl.EXTRA_REMOTE_EXPIRES_AT, 0) ?: 0
+                startRecording()
+            }
         }
         return START_NOT_STICKY
     }
@@ -142,6 +156,7 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun startSegment() {
+        if (!continueRecording || !remoteStartAllowed()) { failAndStop(); return }
         val camera = cameraDevice ?: return
         val directory = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "dashcam").apply { mkdirs() }
 
@@ -156,6 +171,7 @@ class BackgroundRecordingService : Service() {
             val file = File(directory, filename)
 
             mainHandler.post {
+                if (!continueRecording || !remoteStartAllowed()) { failAndStop(); return@post }
                 try {
                     currentFile = file
                     segmentStartMs = startedAt
@@ -168,6 +184,7 @@ class BackgroundRecordingService : Service() {
 
                     camera.createCaptureSession(listOf(recorderSurface), object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
+                            if (!continueRecording || !remoteStartAllowed()) { session.close(); failAndStop(); return }
                             captureSession = session
                             session.setRepeatingRequest(request.build(), null, cameraHandler)
                             recorder?.start()
@@ -192,6 +209,8 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun showStartAlertOnce() {
+        remoteStartExpiresAt = 0L
+        RemoteRecordingControl.recorderStarted = true
         if (!startAlertPending) return
         startAlertPending = false
         mainHandler.post { RecordingStartAlert.show(this@BackgroundRecordingService) }
@@ -263,6 +282,7 @@ class BackgroundRecordingService : Service() {
         try {
             recorder?.stop()
         } catch (_: Exception) {
+            RemoteRecordingControl.recordingError = "The camera could not finalize this segment (it may have been too short)"
             file?.delete()
         }
         recorder?.reset()
@@ -337,6 +357,7 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun failAndStop() {
+        RemoteRecordingControl.recordingError = "Recording failed. Check camera availability, permissions and storage"
         continueRecording = false
         stopAfterCurrentSegmentRequested = false
         currentFile?.delete()
@@ -350,6 +371,7 @@ class BackgroundRecordingService : Service() {
     }
 
     private fun cleanupResources() {
+        RemoteRecordingControl.recorderStarted = false
         mainHandler.removeCallbacks(rotateRunnable)
         mainHandler.removeCallbacks(statusRunnable)
         captureSession?.close()
