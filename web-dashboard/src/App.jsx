@@ -69,6 +69,63 @@ const fromDateInput = value => {
   return year && month && day ? new Date(year, month - 1, day) : undefined
 }
 
+function ArchivePagination({ archiveType, currentPage, totalPages, rangeStart, rangeEnd, total, onPageChange }) {
+  const [pageInput, setPageInput] = useState(String(currentPage))
+
+  useEffect(() => setPageInput(String(currentPage)), [archiveType, currentPage])
+
+  const visiblePages = useMemo(() => {
+    const visibleCount = Math.min(5, totalPages)
+    let start = Math.max(1, currentPage - Math.floor(visibleCount / 2))
+    start = Math.min(start, totalPages - visibleCount + 1)
+    return Array.from({ length: visibleCount }, (_, index) => start + index)
+  }, [currentPage, totalPages])
+
+  const goToPage = value => {
+    const requestedPage = Number.parseInt(value, 10)
+    if (!Number.isFinite(requestedPage)) {
+      setPageInput(String(currentPage))
+      return
+    }
+    const nextPage = Math.min(totalPages, Math.max(1, requestedPage))
+    setPageInput(String(nextPage))
+    onPageChange(nextPage)
+  }
+
+  return <nav className="pagination" aria-label={`${archiveType} archive pages`}>
+    <span>Showing {rangeStart}-{rangeEnd} of {total}</span>
+    <div className="pagination-controls">
+      <button type="button" onClick={() => goToPage(1)} disabled={currentPage <= 1}>First</button>
+      <button type="button" onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1}>Previous</button>
+      <div className="pagination-pages" aria-label="Page numbers">
+        {visiblePages.map(page => <button
+          type="button"
+          key={page}
+          className={page === currentPage ? 'active' : ''}
+          aria-current={page === currentPage ? 'page' : undefined}
+          onClick={() => goToPage(page)}
+        >{page}</button>)}
+      </div>
+      <button type="button" onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= totalPages}>Next</button>
+      <button type="button" onClick={() => goToPage(totalPages)} disabled={currentPage >= totalPages}>Last</button>
+      <form className="pagination-jump" onSubmit={event => { event.preventDefault(); goToPage(pageInput) }}>
+        <label htmlFor={`${archiveType}-page-input`}>Go to</label>
+        <input
+          id={`${archiveType}-page-input`}
+          type="number"
+          inputMode="numeric"
+          min="1"
+          max={totalPages}
+          value={pageInput}
+          onChange={event => setPageInput(event.target.value)}
+          aria-label={`Go to ${archiveType} page`}
+        />
+        <button type="submit">Go</button>
+      </form>
+    </div>
+  </nav>
+}
+
 async function api(path, options) {
   const response = await fetch(`${API}${path}`, options)
   if (!response.ok) {
@@ -2659,14 +2716,15 @@ export default function App() {
           {!loading && audio.length === 0 && <div className="empty"><span>00:00</span><h3>No audio yet</h3><p>Audio recordings will appear here after the phone completes its first upload.</p></div>}
           {loading && <div className="empty"><div className="spinner" /><p>Loading audio library...</p></div>}
         </div>}
-        {!loading && currentTotal > 0 && <nav className="pagination" aria-label={`${archiveType} archive pages`}>
-          <span>Showing {rangeStart}-{rangeEnd} of {currentTotal}</span>
-          <div>
-            <button onClick={() => setCurrentPage(page => Math.max(1, page - 1))} disabled={currentPage <= 1}>Previous</button>
-            <strong>Page {currentPage} of {totalPages}</strong>
-            <button onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))} disabled={currentPage >= totalPages}>Next</button>
-          </div>
-        </nav>}
+        {!loading && currentTotal > 0 && <ArchivePagination
+          archiveType={archiveType}
+          currentPage={currentPage}
+          totalPages={totalPages}
+          rangeStart={rangeStart}
+          rangeEnd={rangeEnd}
+          total={currentTotal}
+          onPageChange={setCurrentPage}
+        />}
       </section>
     </main>
 
