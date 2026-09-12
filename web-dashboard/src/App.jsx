@@ -2641,7 +2641,7 @@ export default function App() {
               <td>{device.liveStreaming ? 'Live streaming' : device.videoRecordingActive ? 'Video recording' : device.audioRecordingActive ? 'Audio recording' : 'Idle'}</td>
               <td><span>Android {device.androidVersion}</span><small className="software-version">App {device.appVersion}</small></td>
               <td>{formatDate(device.lastSeenAt)}</td>
-              <td><button
+              <td><div className="device-remote-actions"><button
                 className={`device-live-button ${device.liveRequested ? 'stop' : ''}`}
                 disabled={!device.liveRequested && (!device.online || !device.liveAccessEnabled || device.videoRecordingActive || device.audioRecordingActive)}
                 title={!device.liveAccessEnabled ? 'Enable Live Access on the phone' : device.liveRequested ? 'Stop live view' : 'Start live view'}
@@ -2649,7 +2649,7 @@ export default function App() {
               ><Icon name={device.liveRequested ? 'stop' : 'camera'} />{device.liveRequested ? 'Stop' : 'View'}</button>
                 <button type="button" className="device-live-button remote-open-button" onClick={() => setRemoteDeviceId(device.deviceId)}>Control</button>
                 <small className="software-version">Control {device.remoteControlEnabled ? 'allowed' : 'off'}</small>
-              </td>
+              </div></td>
             </tr>)}</tbody>
           </table>
           {!loading && devices.length === 0 && <div className="device-empty">No phones have reported to this server yet.</div>}
