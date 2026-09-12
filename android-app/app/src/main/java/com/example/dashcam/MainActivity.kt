@@ -210,8 +210,7 @@ class MainActivity : ComponentActivity() {
     private var audioPlaybackSeeking = false
     private var stopAfterCurrentSegment = false
     private var foregroundStartAlertPending = false
-    private var uploadSettingsExpanded = false
-    private var recordingSettingsExpanded = false
+    private var settingsExpanded = false
     private var serverOnline: Boolean? = null
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -515,13 +514,9 @@ class MainActivity : ComponentActivity() {
         root.addView(storageStatus)
         root.addView(audioStorageStatus)
 
-        val uploadContainer = LinearLayout(this).apply {
+        val settingsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            visibility = if (uploadSettingsExpanded) View.VISIBLE else View.GONE
-        }
-        val recordingSettingsContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = if (recordingSettingsExpanded) View.VISIBLE else View.GONE
+            visibility = if (settingsExpanded) View.VISIBLE else View.GONE
         }
 
         val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
@@ -560,7 +555,7 @@ class MainActivity : ComponentActivity() {
                 buildUi()
             }
         }, LinearLayout.LayoutParams(dp(86), dp(52)).apply { marginStart = dp(8) })
-        uploadContainer.addView(serverUrlRow, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
+        settingsContainer.addView(serverUrlRow, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(8) })
 
         val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         previewRecordButton = actionButton(if (recording != null || continueRecording) "Stop Dashcam" else "Start Dashcam") {
@@ -646,7 +641,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(startAlertSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        recordingSettingsContainer.addView(TextView(this).apply {
+        settingsContainer.addView(TextView(this).apply {
             text = "Background Video Quality"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -674,8 +669,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        recordingSettingsContainer.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        recordingSettingsContainer.addView(TextView(this).apply {
+        settingsContainer.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(TextView(this).apply {
             text = "Video Segment Length"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -693,8 +688,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        recordingSettingsContainer.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        recordingSettingsContainer.addView(TextView(this).apply {
+        settingsContainer.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        settingsContainer.addView(TextView(this).apply {
             text = "Audio Segment Length"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -712,16 +707,7 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        recordingSettingsContainer.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        val recordingSettingsToggle = actionButton(
-            if (recordingSettingsExpanded) "Hide Recording Settings" else "Show Recording Settings"
-        ) {
-            recordingSettingsExpanded = !recordingSettingsExpanded
-            recordingSettingsContainer.visibility = if (recordingSettingsExpanded) View.VISIBLE else View.GONE
-            (it as Button).text = if (recordingSettingsExpanded) "Hide Recording Settings" else "Show Recording Settings"
-        }
-        root.addView(recordingSettingsToggle, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
-        root.addView(recordingSettingsContainer, LinearLayout.LayoutParams(-1, -2))
+        settingsContainer.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Local Audio") {
             showLocalAudio()
@@ -730,15 +716,15 @@ class MainActivity : ComponentActivity() {
             showLocalVideos()
         }, weighted().apply { marginStart = dp(8) })
         root.addView(secondaryControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
-        val uploadToggle = actionButton(
-            if (uploadSettingsExpanded) "Hide Upload Settings" else "Show Upload Settings"
+        val settingsToggle = actionButton(
+            if (settingsExpanded) "Hide Settings" else "Show Settings"
         ) {
-            uploadSettingsExpanded = !uploadSettingsExpanded
-            uploadContainer.visibility = if (uploadSettingsExpanded) View.VISIBLE else View.GONE
-            (it as Button).text = if (uploadSettingsExpanded) "Hide Upload Settings" else "Show Upload Settings"
+            settingsExpanded = !settingsExpanded
+            settingsContainer.visibility = if (settingsExpanded) View.VISIBLE else View.GONE
+            (it as Button).text = if (settingsExpanded) "Hide Settings" else "Show Settings"
         }
-        root.addView(uploadToggle, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
-        root.addView(uploadContainer, LinearLayout.LayoutParams(-1, -2))
+        root.addView(settingsToggle, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(settingsContainer, LinearLayout.LayoutParams(-1, -2))
         val autoUploadControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         autoUploadControls.addView(actionButton(
             if (UploadWorker.isAutomaticUploadEnabled(this)) "Auto Upload: On" else "Auto Upload: Off"
@@ -750,8 +736,8 @@ class MainActivity : ComponentActivity() {
                 buildUi()
             }
         }, LinearLayout.LayoutParams(-1, -1))
-        uploadContainer.addView(autoUploadControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
-        uploadContainer.addView(actionButton("Upload Now") {
+        settingsContainer.addView(autoUploadControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        settingsContainer.addView(actionButton("Upload Now") {
             startManualUpload()
         }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         val uploadTypeControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
@@ -761,7 +747,7 @@ class MainActivity : ComponentActivity() {
         uploadTypeControls.addView(actionButton("Upload Video Only") {
             startManualVideoUpload()
         }, weighted().apply { marginStart = dp(8) })
-        uploadContainer.addView(uploadTypeControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        settingsContainer.addView(uploadTypeControls, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         root.addView(actionButton("Battery Temperature") {
             showBatteryTemperatureHistory(24)
         }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
