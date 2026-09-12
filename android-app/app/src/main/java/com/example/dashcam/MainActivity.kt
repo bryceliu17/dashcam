@@ -73,6 +73,7 @@ import com.example.dashcam.recording.AudioSegmentSettings
 import com.example.dashcam.recording.AudioStoragePolicy
 import com.example.dashcam.recording.PowerMonitorService
 import com.example.dashcam.recording.PowerRecordingSettings
+import com.example.dashcam.recording.RemoteRecordingControl
 import com.example.dashcam.recording.RecordingService
 import com.example.dashcam.recording.RecordingStartAlert
 import com.example.dashcam.recording.RecordingStartAlertMode
@@ -330,12 +331,14 @@ class MainActivity : ComponentActivity() {
                 updatePreviewAvailability()
             }
             if (liveError.isNotBlank() && liveError != previousError) toast(liveError)
+            updateModeButtons()
             updateRecordingStatus()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RemoteRecordingControl.releasePreview = { cameraProvider?.unbindAll() }
         backgroundRecordingActive = PowerRecordingSettings.isBackgroundRecordingActive(this)
         audioRecordingActive = PowerRecordingSettings.isAudioRecordingActive(this)
         liveAccessEnabled = LiveAccessSettings.isEnabled(this)
@@ -343,10 +346,8 @@ class MainActivity : ComponentActivity() {
         liveError = LiveAccessSettings.error(this)
         val prefs = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
         buildUi()
-        if (liveAccessEnabled &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        ) {
-            LiveAccessService.enable(this)
+        if (liveAccessEnabled || RemoteRecordingControl.isEnabled(this)) {
+            LiveAccessService.refreshConnection(this)
         }
         serverUrl.setText(prefs.getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL))
         setRecordingPreference(false)
@@ -417,6 +418,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        RemoteRecordingControl.releasePreview = null
         if (recording != null || continueRecording) stopDashcam("Activity closed")
         cameraExecutor.shutdown()
         super.onDestroy()
@@ -581,6 +583,21 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(liveAccessButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
         updateLiveAccessButton()
+        root.addView(actionButton(
+            if (RemoteRecordingControl.isEnabled(this)) "Allow server control: On" else "Allow server control: Off"
+        ) {
+            val enabled = !RemoteRecordingControl.isEnabled(this)
+            RemoteRecordingControl.setEnabled(this, enabled)
+            LiveAccessService.refreshConnection(this)
+            keepHomeScrollPosition { buildUi() }
+            lifecycleScope.launch(Dispatchers.IO) { DeviceStatusReporter.reportNow(this@MainActivity) }
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(TextView(this).apply {
+            text = "When on, your server can start/stop background video and change recording settings. Live camera access is separate."
+            textSize = 12f
+            setTextColor(Color.rgb(75, 85, 99))
+            setPadding(0, dp(4), 0, dp(4))
+        })
         root.addView(TextView(this).apply {
             text = "Recording Mode"
             textSize = 12f

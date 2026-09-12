@@ -38,6 +38,10 @@ import com.example.dashcam.network.DeviceStatusReporter
 import com.example.dashcam.network.ServerClient
 import com.example.dashcam.network.toJson
 import com.example.dashcam.recording.PowerRecordingSettings
+import com.example.dashcam.recording.RemoteRecordingControl
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import com.example.dashcam.upload.UploadWorker
 import com.example.dashcam.upload.UploadPolicySettings
 import kotlinx.coroutines.CoroutineScope
@@ -60,6 +64,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class LiveAccessService : Service() {
+    private val recordingCommandMutex = Mutex()
+    private fun connectionEnabled() = LiveAccessSettings.isEnabled(this) || RemoteRecordingControl.isEnabled(this)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val frameUploading = AtomicBoolean(false)
     private val cameraGeneration = AtomicInteger(0)
@@ -140,8 +146,14 @@ class LiveAccessService : Service() {
             ACTION_DISABLE -> {
                 LiveAccessSettings.setEnabled(this, false)
                 liveRequested = false
-                stopMonitoring()
                 stopStreaming()
+                if (RemoteRecordingControl.isEnabled(this)) {
+                    updateNotification()
+                    broadcastState()
+                    scope.launch { DeviceStatusReporter.reportNow(this@LiveAccessService) }
+                    return START_STICKY
+                }
+                stopMonitoring()
                 broadcastState()
                 scope.launch { DeviceStatusReporter.reportNow(this@LiveAccessService) }
                 stopForegroundCompat()
@@ -149,7 +161,14 @@ class LiveAccessService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                LiveAccessSettings.setEnabled(this, true)
+                if (intent?.action == ACTION_ENABLE) LiveAccessSettings.setEnabled(this, true)
+                if (!connectionEnabled()) {
+                    startForeground(NOTIFICATION_ID, buildNotification())
+                    stopMonitoring()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 startForeground(NOTIFICATION_ID, buildNotification())
                 startMonitoring()
                 broadcastState()
@@ -167,7 +186,7 @@ class LiveAccessService : Service() {
                 applyLiveRequest(it.liveRequested)
             }
             connectControlSocket()
-            while (isActive && LiveAccessSettings.isEnabled(this@LiveAccessService)) {
+            while (isActive && connectionEnabled()) {
                 val recording = PowerRecordingSettings.isAnyRecordingActive(this@LiveAccessService)
                 if (recording && (liveRequested || streaming || cameraStarting)) {
                     liveRequested = false
@@ -180,7 +199,7 @@ class LiveAccessService : Service() {
     }
 
     private fun connectControlSocket() {
-        if (!LiveAccessSettings.isEnabled(this)) return
+        if (!connectionEnabled()) return
         val generation = synchronized(socketStateLock) {
             if (controlSocket != null || socketConnecting) return
             socketConnecting = true
@@ -201,7 +220,7 @@ class LiveAccessService : Service() {
         socketClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 synchronized(socketStateLock) {
-                    if (generation != socketGeneration || !LiveAccessSettings.isEnabled(this@LiveAccessService)) {
+                    if (generation != socketGeneration || !connectionEnabled()) {
                         webSocket.close(1000, "Live Access disabled")
                         return
                     }
@@ -224,7 +243,20 @@ class LiveAccessService : Service() {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (generation != socketGeneration) return
                 val message = try { JSONObject(text) } catch (_: Exception) { return }
+                if (message.optString("type") == "recording_request") {
+                    scope.launch {
+                        // Serialize commands; recheck permission and expiry at execution time.
+                        recordingCommandMutex.withLock {
+                            val response = RemoteRecordingControl.execute(this@LiveAccessService, message)
+                            DeviceStatusReporter.reportNow(this@LiveAccessService)
+                            webSocket.send(response)
+                            withContext(Dispatchers.Main) { broadcastState() }
+                        }
+                    }
+                    return
+                }
                 handleControlMessage(message)
             }
 
@@ -255,7 +287,7 @@ class LiveAccessService : Service() {
     }
 
     private fun scheduleReconnect() {
-        if (!LiveAccessSettings.isEnabled(this) || reconnectJob?.isActive == true) return
+        if (!connectionEnabled() || reconnectJob?.isActive == true) return
         val delayMs = RECONNECT_DELAYS_MS[reconnectAttempt.coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)]
         reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(RECONNECT_DELAYS_MS.lastIndex)
         reconnectJob = scope.launch {
@@ -279,6 +311,7 @@ class LiveAccessService : Service() {
     }
 
     private fun applyLiveRequest(enabled: Boolean) {
+        if (enabled && !LiveAccessSettings.isEnabled(this)) return
         liveRequested = enabled
         val recording = PowerRecordingSettings.isAnyRecordingActive(this)
         when {
@@ -750,7 +783,7 @@ class LiveAccessService : Service() {
 
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_dashcam)
-        .setContentTitle("Dashcam Live Access")
+        .setContentTitle("Dashcam server connection")
         .setContentText(
             when {
                 streaming -> "Live camera streaming"
@@ -767,7 +800,7 @@ class LiveAccessService : Service() {
         )
         .addAction(
             0,
-            "Disable",
+            "Disable Live Access",
             PendingIntent.getService(
                 this, 1, Intent(this, LiveAccessService::class.java).setAction(ACTION_DISABLE),
                 pendingIntentFlags()
@@ -776,7 +809,7 @@ class LiveAccessService : Service() {
         .build()
 
     private fun updateNotification() {
-        if (!LiveAccessSettings.isEnabled(this)) return
+        if (!connectionEnabled()) return
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
             .notify(NOTIFICATION_ID, buildNotification())
     }
@@ -829,6 +862,7 @@ class LiveAccessService : Service() {
 
     companion object {
         const val ACTION_ENABLE = "com.example.dashcam.live.ENABLE"
+        const val ACTION_REFRESH = "com.example.dashcam.live.REFRESH"
         const val ACTION_DISABLE = "com.example.dashcam.live.DISABLE"
         const val ACTION_STATE = "com.example.dashcam.live.STATE"
         const val EXTRA_ENABLED = "enabled"
@@ -849,6 +883,11 @@ class LiveAccessService : Service() {
                 context.applicationContext,
                 Intent(context.applicationContext, LiveAccessService::class.java).setAction(ACTION_ENABLE)
             )
+        }
+
+        fun refreshConnection(context: Context) {
+            ContextCompat.startForegroundService(context.applicationContext,
+                Intent(context.applicationContext, LiveAccessService::class.java).setAction(ACTION_REFRESH))
         }
 
         fun disable(context: Context) {

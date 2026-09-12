@@ -33,7 +33,12 @@ data class DeviceHeartbeat(
     val audioRecordingActive: Boolean,
     val liveAccessEnabled: Boolean,
     val liveStreaming: Boolean,
-    val liveError: String
+    val liveError: String,
+    val remoteControlEnabled: Boolean = false,
+    val backgroundRecordingActive: Boolean = false,
+    val backgroundVideoQuality: String = "Balanced",
+    val videoSegmentMinutes: Int = 5,
+    val startAlert: String = "Silent"
 )
 
 data class BatteryHistoryRequest(val requestId: String, val hours: Int)
@@ -62,6 +67,11 @@ fun DeviceHeartbeat.toJson(): JSONObject = JSONObject()
     .put("liveAccessEnabled", liveAccessEnabled)
     .put("liveStreaming", liveStreaming)
     .put("liveError", liveError)
+    .put("remoteControlEnabled", remoteControlEnabled)
+    .put("backgroundRecordingActive", backgroundRecordingActive)
+    .put("backgroundVideoQuality", backgroundVideoQuality)
+    .put("videoSegmentMinutes", videoSegmentMinutes)
+    .put("startAlert", startAlert)
 
 class ServerClient(private val baseUrl: String) {
     private val client = OkHttpClient.Builder()
