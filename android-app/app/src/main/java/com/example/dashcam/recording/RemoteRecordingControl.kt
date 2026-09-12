@@ -24,6 +24,8 @@ object RemoteRecordingControl {
 
     @Volatile var recorderStarted = false
     @Volatile var recordingError: String? = null
+    @Volatile var audioRecorderStarted = false
+    @Volatile var audioRecordingError: String? = null
     var releasePreview: (() -> Unit)? = null
     private val replies = LinkedHashMap<String, String>()
 
@@ -38,7 +40,7 @@ object RemoteRecordingControl {
             val remaining = message.optLong("expiresAt") - System.currentTimeMillis()
             check(remaining in 1..60_000L) { "Command expired. Check the phone clock and try again" }
             val action = message.optString("action")
-            check(action in listOf("start", "stop", "configure")) { "Unknown recording command" }
+            check(action in listOf("start", "stop", "configure", "start_audio", "stop_audio")) { "Unknown recording command" }
             val wasActive = PowerRecordingSettings.isBackgroundRecordingActive(context)
             if (action == "stop") {
                 check(!PowerRecordingSettings.isVideoRecordingActive(context) || wasActive) {
@@ -55,6 +57,39 @@ object RemoteRecordingControl {
                         true
                     } == true) { "Still saving the recording. Check status before trying again" }
                     check(recordingError == null) { recordingError.orEmpty() }
+                }
+            } else if (action == "stop_audio") {
+                if (PowerRecordingSettings.isAudioRecordingActive(context)) {
+                    audioRecordingError = null
+                    context.startService(Intent(context, AudioRecordingService::class.java)
+                        .setAction(AudioRecordingService.ACTION_STOP))
+                    check(withTimeoutOrNull(20_000L) {
+                        while (PowerRecordingSettings.isAudioRecordingActive(context)) delay(100)
+                        true
+                    } == true) { "Still saving the audio recording. Check status before trying again" }
+                    check(audioRecordingError == null) { audioRecordingError.orEmpty() }
+                }
+            } else if (action == "start_audio") {
+                check(!PowerRecordingSettings.isAnyRecordingActive(context)) { "Stop the current recording before starting audio" }
+                check(!LiveAccessSettings.isStreaming(context)) { "Close live camera before starting audio recording" }
+                check(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    "Grant microphone permission in the phone app first"
+                }
+                check(isEnabled(context)) { "Server control was disabled on the phone" }
+                audioRecorderStarted = false
+                audioRecordingError = null
+                ContextCompat.startForegroundService(context,
+                    Intent(context, AudioRecordingService::class.java)
+                        .setAction(AudioRecordingService.ACTION_START)
+                        .putExtra(EXTRA_REMOTE_EXPIRES_AT, message.optLong("expiresAt")))
+                val started = withTimeoutOrNull(20_000L) {
+                    while (!audioRecorderStarted && audioRecordingError == null && isEnabled(context)) delay(100)
+                    audioRecorderStarted
+                } == true
+                if (!started) {
+                    context.startService(Intent(context, AudioRecordingService::class.java)
+                        .setAction(AudioRecordingService.ACTION_STOP))
+                    kotlin.error(audioRecordingError ?: "Audio recording could not start. Check microphone permission and storage")
                 }
             } else {
                 check(!PowerRecordingSettings.isAnyRecordingActive(context)) { "Stop the current recording before changing settings or starting" }
@@ -100,6 +135,7 @@ object RemoteRecordingControl {
         JSONObject().put("type", "recording_response").put("requestId", id)
             .put("success", failureMessage == null).put("error", failureMessage ?: JSONObject.NULL)
             .put("backgroundRecordingActive", PowerRecordingSettings.isBackgroundRecordingActive(context))
+            .put("audioRecordingActive", PowerRecordingSettings.isAudioRecordingActive(context))
             .put("quality", BackgroundVideoQualitySettings.quality(context).name)
             .put("segmentMinutes", VideoSegmentSettings.durationMinutes(context))
             .put("startAlert", RecordingStartAlertSettings.mode(context).name)
