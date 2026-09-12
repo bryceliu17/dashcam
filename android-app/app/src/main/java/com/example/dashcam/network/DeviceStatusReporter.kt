@@ -176,7 +176,8 @@ object DeviceStatusReporter {
             backgroundRecordingActive = PowerRecordingSettings.isBackgroundRecordingActive(context),
             backgroundVideoQuality = BackgroundVideoQualitySettings.quality(context).name,
             videoSegmentMinutes = VideoSegmentSettings.durationMinutes(context),
-            startAlert = RecordingStartAlertSettings.mode(context).name
+            startAlert = RecordingStartAlertSettings.mode(context).name,
+            powerAutoBackgroundEnabled = PowerRecordingSettings.isPowerAutoBackgroundEnabled(context)
         )
     }
 

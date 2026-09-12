@@ -1718,6 +1718,7 @@ function RemoteRecordingPanel({ device, onClose, onUpdated }) {
         <p className="remote-recording-state">{device.backgroundRecordingActive ? 'Background video recording' : device.videoRecordingActive ? 'Foreground video recording' : device.audioRecordingActive ? 'Audio recording' : 'Idle'} · {connected ? 'Control connected' : 'Control unavailable'}</p>
         {!device.remoteControlEnabled && <p>Turn on “Allow server control” in the phone app. Only the phone can grant this permission.</p>}
         {device.remoteControlEnabled && !connected && <p>The phone must reconnect before commands can be sent. Offline commands are not queued.</p>}
+        {device.powerAutoBackgroundEnabled && !device.isCharging && <p className="remote-power-warning">Power Auto mode is on, but this phone is not charging. A remotely started video will stop after the current segment.</p>}
         <form ref={form} onSubmit={event => { event.preventDefault(); send('start') }}>
           <fieldset disabled={!connected || Boolean(busy) || recording}>
             <label>Background video quality<select value={quality} onChange={event => { setQuality(event.target.value); setDirty(true) }}>

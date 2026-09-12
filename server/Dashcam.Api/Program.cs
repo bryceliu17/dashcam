@@ -2403,6 +2403,7 @@ static async Task EnsureDeviceStatusTableAsync(DashcamDbContext db)
     await EnsureColumnAsync(db, "DeviceStatuses", "BackgroundVideoQuality", "TEXT NOT NULL DEFAULT 'Balanced'");
     await EnsureColumnAsync(db, "DeviceStatuses", "VideoSegmentMinutes", "INTEGER NOT NULL DEFAULT 5");
     await EnsureColumnAsync(db, "DeviceStatuses", "StartAlert", "TEXT NOT NULL DEFAULT 'Silent'");
+    await EnsureColumnAsync(db, "DeviceStatuses", "PowerAutoBackgroundEnabled", "INTEGER NOT NULL DEFAULT 0");
 }
 
 static async Task EnsureRecordingSourceColumnsAsync(DashcamDbContext db)
@@ -2769,6 +2770,7 @@ static object ToDeviceResponse(DeviceStatus device, DateTime now, bool? socketCo
     device.BackgroundVideoQuality,
     device.VideoSegmentMinutes,
     device.StartAlert,
+    device.PowerAutoBackgroundEnabled,
     device.LiveRequested,
     device.LiveStreaming,
     device.LiveError,
@@ -2908,6 +2910,7 @@ static async Task<DeviceStatus> ApplyDeviceHeartbeatAsync(
     device.BackgroundVideoQuality = request.BackgroundVideoQuality == "High" ? "High" : "Balanced";
     device.VideoSegmentMinutes = Math.Clamp(request.VideoSegmentMinutes, 0, 1440);
     device.StartAlert = request.StartAlert is "SoundOnly" or "ScreenOnly" or "SoundAndScreen" ? request.StartAlert : "Silent";
+    device.PowerAutoBackgroundEnabled = request.PowerAutoBackgroundEnabled;
 
     if (!request.LiveAccessEnabled || request.VideoRecordingActive || request.AudioRecordingActive)
     {
@@ -3033,6 +3036,7 @@ public sealed record DeviceHeartbeatRequest(
     bool BackgroundRecordingActive = false,
     string? BackgroundVideoQuality = "Balanced",
     int VideoSegmentMinutes = 5,
-    string? StartAlert = "Silent");
+    string? StartAlert = "Silent",
+    bool PowerAutoBackgroundEnabled = false);
 public sealed record LiveRequest(bool Enabled);
 public sealed record LiveTorchRequest(bool Enabled);

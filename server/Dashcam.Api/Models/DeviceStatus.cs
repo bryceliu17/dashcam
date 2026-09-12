@@ -21,6 +21,7 @@ public sealed class DeviceStatus
     public string BackgroundVideoQuality { get; set; } = "Balanced";
     public int VideoSegmentMinutes { get; set; } = 5;
     public string StartAlert { get; set; } = "Silent";
+    public bool PowerAutoBackgroundEnabled { get; set; }
     public bool LiveRequested { get; set; }
     public bool LiveStreaming { get; set; }
     public required string LiveError { get; set; }

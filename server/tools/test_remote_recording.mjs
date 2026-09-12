@@ -11,6 +11,7 @@ const status = {
   androidVersion: 'test', appVersion: 'test', batteryLevel: 70, chargingSource: 'None',
   liveAccessEnabled: false, remoteControlEnabled: false,
   backgroundVideoQuality: 'Balanced', videoSegmentMinutes: 5, startAlert: 'Silent',
+  powerAutoBackgroundEnabled: true,
 }
 async function post(path, payload) {
   const response = await fetch(`${base}${path}`, {
@@ -97,6 +98,7 @@ try {
   assert.equal(device.remoteControlEnabled, true)
   assert.equal(device.liveAccessEnabled, false)
   assert.equal(device.backgroundVideoQuality, 'Balanced')
+  assert.equal(device.powerAutoBackgroundEnabled, true)
   console.log('PASS: permission, validation, offline rejection, concurrency, request IDs, phone acknowledgement and remote-only status')
 } finally {
   socket?.close()

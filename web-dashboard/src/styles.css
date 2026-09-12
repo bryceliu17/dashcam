@@ -13,6 +13,7 @@
 .remote-recording-panel button:disabled,.remote-recording-panel fieldset:disabled { opacity: .5; cursor: not-allowed; }
 .remote-recording-body .remote-command-error { color: #ffaba4; }
 .remote-recording-body .remote-command-status { color: #a9ff5c; }
+.remote-recording-body .remote-power-warning { margin: 12px 0; padding: 10px 12px; border: 1px solid #665933; background: #211d10; color: #e7cd82; }
 .device-remote-actions { display: grid; grid-template-columns: repeat(2, minmax(76px, 1fr)); gap: 6px; min-width: 164px; }
 .device-remote-actions .device-live-button { width: 100%; }
 .device-remote-actions .remote-open-button { margin: 0; }
