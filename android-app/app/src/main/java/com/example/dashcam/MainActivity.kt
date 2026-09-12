@@ -211,6 +211,7 @@ class MainActivity : ComponentActivity() {
     private var stopAfterCurrentSegment = false
     private var foregroundStartAlertPending = false
     private var uploadSettingsExpanded = false
+    private var recordingSettingsExpanded = false
     private var serverOnline: Boolean? = null
     private val timerRunnable = object : Runnable {
         override fun run() {
@@ -518,6 +519,10 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             visibility = if (uploadSettingsExpanded) View.VISIBLE else View.GONE
         }
+        val recordingSettingsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (recordingSettingsExpanded) View.VISIBLE else View.GONE
+        }
 
         val savedServerUrl = getSharedPreferences(UploadWorker.PREFS, MODE_PRIVATE)
             .getString(UploadWorker.KEY_SERVER_URL, UploadWorker.DEFAULT_SERVER_URL)
@@ -641,7 +646,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         root.addView(startAlertSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        recordingSettingsContainer.addView(TextView(this).apply {
             text = "Background Video Quality"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -669,8 +674,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        recordingSettingsContainer.addView(backgroundVideoQualitySpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        recordingSettingsContainer.addView(TextView(this).apply {
             text = "Video Segment Length"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -688,8 +693,8 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
-        root.addView(TextView(this).apply {
+        recordingSettingsContainer.addView(segmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        recordingSettingsContainer.addView(TextView(this).apply {
             text = "Audio Segment Length"
             textSize = 12f
             setTextColor(Color.rgb(75, 85, 99))
@@ -707,7 +712,16 @@ class MainActivity : ComponentActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             }
         }
-        root.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        recordingSettingsContainer.addView(audioSegmentDurationSpinner, LinearLayout.LayoutParams(-1, dp(52)))
+        val recordingSettingsToggle = actionButton(
+            if (recordingSettingsExpanded) "Hide Recording Settings" else "Show Recording Settings"
+        ) {
+            recordingSettingsExpanded = !recordingSettingsExpanded
+            recordingSettingsContainer.visibility = if (recordingSettingsExpanded) View.VISIBLE else View.GONE
+            (it as Button).text = if (recordingSettingsExpanded) "Hide Recording Settings" else "Show Recording Settings"
+        }
+        root.addView(recordingSettingsToggle, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(8) })
+        root.addView(recordingSettingsContainer, LinearLayout.LayoutParams(-1, -2))
         val secondaryControls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         secondaryControls.addView(actionButton("Local Audio") {
             showLocalAudio()
